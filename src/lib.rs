@@ -1,6 +1,7 @@
 use pyo3::{prelude::*, types::PyFunction, exceptions::PyIndexError};
 #[allow(unused_imports)]
 use std::cmp::Ordering::*;
+use std::sync::{Arc, RwLock};
 
 
 struct Node {
@@ -8,14 +9,17 @@ struct Node {
     item: Py<PyAny>,
     /// This should be used for any comparisions
     value: Py<PyAny>,
-    left: Option<Box<Node>>,
-    right: Option<Box<Node>>,
+    left: Option<WNode>,
+    right: Option<WNode>,
 }
+
+/// Wrapped Node
+type WNode = Arc<RwLock<Node>>;
 
 /// PriorityQueue implmented with an explicit binary search tree
 #[pyclass]
 struct PriorityQueue {
-    root: Option<Box<Node>>,
+    root: Option<WNode>,
     get_cmpison_value: Option<Py<PyFunction>>,
     length: usize,
 }
@@ -33,25 +37,30 @@ impl PriorityQueue {
         }
     }
 
-    /// Pushes the specified item onto the queue. It is a logical error to modify the item after it has been pushed.
+    /// Pushes the specified item onto the queue.
+    /// It is a logical error to modify the item in such a way that its comparison value
+    /// would change after it has been pushed.
     fn push(&mut self, item: &PyAny) -> PyResult<()>{
         let py = item.py();
-        let new_node = Box::new(Node {
+        let new_node = Node {
             item: item.into_py(py),
             value: self.get_comparison_value_for(item)?,
             left: None,
             right: None,
-        });
+        };
+
         // Find position to put new node
-        let mut next = &mut self.root;
+        let mut next = &mut self.root; // Needs to be &mut
         while let Some(node) = next {
-            match new_node.value.as_ref(py).compare(&node.value)? {
-                Less => next = &mut node.left,
-                Equal | Greater => next = &mut node.right,
+            let mut node = node.get_mut().unwrap();
+            next = match new_node.value.as_ref(py).compare(&node.value)? {
+                Less => &mut node.left,
+                Equal | Greater => &mut node.right,
             };
         }
         debug_assert!(next.is_none());
-        *next = Some(new_node);
+
+        *next = Some(Arc::new(RwLock::new(new_node))); // Put node
         self.length += 1;
         Ok(())
     }
@@ -68,10 +77,24 @@ impl PriorityQueue {
         self.root.is_none()
     }
 
+    /// Access the next item without removing it from the queue.
+    /// It is a logical error to modify the item returned by this method in such a way that its
+    /// comparison value would change.
+    fn peek(&self) -> Option<&Py<PyAny>> {
+        self.root.map(|ref root_node| {
+            let mut next = root_node.read().unwrap();
+            while let Some(right_node) = &next.right {
+                next = right_node.read().unwrap();
+            };
+            next
+        }).map(|node| &node.item)
+    }
+
     fn __contains__(&self, py: Python<'_>, item: &PyAny) -> PyResult<bool> {
         let value = self.get_comparison_value_for(item)?;
         let mut next = &self.root;
         while let Some(node) = next {
+            let node = node.read().unwrap();
             match value.as_ref(py).compare(&node.value)? {
                 Less => next = &node.left,
                 Greater => next = &node.right,
@@ -81,76 +104,97 @@ impl PriorityQueue {
         Ok(false)
     }
 
-    fn __getitem__(&self, index: usize) -> PyResult<&Py<PyAny>> {
-        self.into_iter().nth(index).ok_or(PyIndexError::new_err("Index out of range!"))
-    }
-    
-    /// Access the next item without removing it from the queue.
-    /// It is a logical error to modify the item returned by this method.
-    fn peek(&self) -> Option<&Py<PyAny>> {
-        self.greatest_node().map(|node| &node.item)
+    /// Ez impl by calling __delitem__ when it is impled
+    fn remove(&mut self) { todo!() }
+
+    fn __getitem__(&self, index: usize) -> PyResult<Py<PyAny>> {
+        self.into_iter().nth(index).ok_or(PyIndexError::new_err(
+            format!("Index: {index} out of range!")
+        ))
     }
 
     fn __len__(&self) -> usize {
         self.length
     }
+
+    fn __iter__(&self) -> IntoIter {
+        self.into_iter()
+    }
 }
 
-impl<'a> IntoIterator for &'a PriorityQueue {
-    type Item = &'a Py<PyAny>;
-    type IntoIter = Iter<'a>;
+impl IntoIterator for &PriorityQueue {
+    type Item = Py<PyAny>;
+    type IntoIter = IntoIter;
 
     fn into_iter(self) -> Self::IntoIter {
         let mut stack = Vec::with_capacity(self.length);
 
         // Iter will do the rest
-        if let Some(root_node) = self.root.as_deref() {
-            stack.push((false, root_node, false));
+        if let Some(root_node) = self.root {
+            stack.push((false, Arc::clone(&root_node), false));
         }
+        // if explored false then add the nodes in the left path, the current node, and then the nodes in the right
+        // path to the stack, explored is only one bool and prob should go after the node in the tupil. Muetex should
+        // be able to restore mutability.
         
-        Iter { stack }
+        IntoIter { stack }
     }
 }
 
-struct Iter<'a> {
-    stack: Vec<(bool, &'a Node, bool)>, // explored left, explored right
+#[pyclass]
+struct IntoIter {
+    stack: Vec<(bool, WNode, bool)>,
 }
 
-impl<'a> Iterator for Iter<'a> {
-    type Item = &'a Py<PyAny>;
+impl Iterator for IntoIter {
+    type Item = Py<PyAny>;
 
-    fn next(&mut self) -> Option<&'a Py<PyAny>> {
+    fn next(&mut self) -> Option<Py<PyAny>> {
         self.stack.pop().map(|(explored_left, node, explored_right)| {
             if !explored_right {
                 self.stack.push((explored_left, node, true));
 
-                let mut next = node.right.as_deref();
+                let mut next = node.right.as_ref();
                 while let Some(right_node) = next {
-                    self.stack.push((false, right_node, true));
-                    next = right_node.right.as_deref();
+                    self.stack.push((false, Arc::clone(&right_node), true));
+                    next = right_node.right.as_ref();
                 }
 
-                // SAFETY: We just pushed a node on above so we can pop off at least one
-                unsafe { return &self.stack.pop().unwrap_unchecked().1.item }
+                unsafe {
+                    // SAFETY: We just pushed a node on above so we can pop off at least one
+                    return Py::clone(&self.stack.pop().unwrap_unchecked().1.item);
+                }
             }
             if !explored_left {
                 let slice_start = self.stack.len();
                 let mut slice_end = slice_start;
 
-                let mut next = node.left.as_deref();
+                let mut next = node.left.as_ref();
                 while let Some(left_node) = next {
-                    self.stack.push((true, left_node, false));
-                    next = left_node.left.as_deref();
+                    self.stack.push((true, Arc::clone(&left_node), false));
+                    next = left_node.left.as_ref();
                     slice_end += 1;
                 }
                 self.stack[slice_start..slice_end].reverse(); // So they are popped off the stack in the right order
 
-                return &node.item;
+                return Py::clone(&node.item);
             }
             panic!()
         })
     }
 }
+
+#[pymethods]
+impl IntoIter {
+    fn __next__(&mut self) -> Option<<Self as Iterator>::Item> {
+        self.next()
+    }
+
+    fn __iter__(&self) -> &Self {
+        self
+    }
+}
+
 
 /// Rust only
 impl PriorityQueue {
@@ -164,13 +208,7 @@ impl PriorityQueue {
 
     /// Returns a ref to the node with the highest value in the tree
     fn greatest_node(&self) -> Option<&Node> {
-        self.root.as_deref().map(|root_node| {
-            let mut next = root_node;
-            while let Some(right_node) = &next.right {
-                next = right_node;
-            };
-            next
-        })
+
     }
 }
 

@@ -1,4 +1,4 @@
-from python_extension import PriorityQueue as PQueue
+from python_extension import PriorityQueue
 import unittest
 
 
@@ -16,7 +16,7 @@ class Test(unittest.TestCase):
         self.assertEqual(0, len(self.queue))
         self.queue.push(5)
         self.queue.push(10)
-        self.queue.push(5)
+        self.queue.push(5)  # Hacker rank
         self.queue.push(1)
         self.queue.push(3)
         self.queue.peek()  # Peek does not modify length
@@ -48,10 +48,8 @@ class Test(unittest.TestCase):
         # self.assertEqual(None, self.queue.pop())  # Uncomment when implmented
 
     def setUp(self) -> None:
-        self.queue = PQueue()
+        self.queue = PriorityQueue()
 
 
 if __name__ == '__main__':
     unittest.main()
-
-
