@@ -1,7 +1,10 @@
-use pyo3::{prelude::*, types::PyFunction, exceptions::PyIndexError};
+use pyo3::{prelude::*, types::PyFunction};
+#[allow(unused_imports)]
+use pyo3::exceptions::PyIndexError;
 #[allow(unused_imports)]
 use std::cmp::Ordering::*;
 use std::sync::{Arc, RwLock};
+use std::iter::FusedIterator;
 
 
 struct Node {
@@ -9,17 +12,14 @@ struct Node {
     item: Py<PyAny>,
     /// This should be used for any comparisions
     value: Py<PyAny>,
-    left: Option<WNode>,
-    right: Option<WNode>,
+    left: Option<Box<Node>>,
+    right: Option<Box<Node>>,
 }
-
-/// Wrapped Node
-type WNode = Arc<RwLock<Node>>;
 
 /// PriorityQueue implmented with an explicit binary search tree
 #[pyclass]
 struct PriorityQueue {
-    root: Option<WNode>,
+    root: Option<Arc<RwLock<Node>>>, // Tree has a read-mode and a write-mode
     get_cmpison_value: Option<Py<PyFunction>>,
     length: usize,
 }
@@ -27,7 +27,7 @@ struct PriorityQueue {
 #[pymethods]
 impl PriorityQueue {
     /// comparison_value defines for each item the value that will be used for comparisions.
-    /// If it is None then the item will be used for comparisions.
+    /// If it is None then the item will be used as this comparision value.
     #[new]
     fn new(comparison_value: Option<Py<PyFunction>>) -> Self {
         Self {
@@ -49,24 +49,33 @@ impl PriorityQueue {
             right: None,
         };
 
-        // Find position to put new node
-        let mut next = &mut self.root; // Needs to be &mut
-        while let Some(node) = next {
-            let mut node = node.get_mut().unwrap();
-            next = match new_node.value.as_ref(py).compare(&node.value)? {
-                Less => &mut node.left,
-                Equal | Greater => &mut node.right,
-            };
-        }
-        debug_assert!(next.is_none());
+        match &self.root {
+            Some(root) => {
+                let mut root = root.write().unwrap();
 
-        *next = Some(Arc::new(RwLock::new(new_node))); // Put node
+                let mut next = match new_node.value.as_ref(py).compare(&root.value)? {
+                    Less => &mut root.left,
+                    Equal | Greater => &mut root.right,
+                };
+                while let Some(node) = next {
+                    match new_node.value.as_ref(py).compare(&node.value)? {
+                        Less => next = &mut node.left,
+                        Equal | Greater => next = &mut node.right,
+                    }
+                }
+                debug_assert!(next.is_none());
+
+                *next = Some(Box::new(new_node)); // Put node
+            },
+            None => self.root = Some(Arc::new(RwLock::new(new_node))),
+        }
+
         self.length += 1;
         Ok(())
     }
 
-    /// Pops the next item off the queue
-    fn pop(&mut self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> { todo!() }
+    // /// Pops the next item off the queue
+    // fn pop(&mut self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> { todo!() }
     
     fn clear(&mut self) { 
         self.root = None; // Fine for now, may be tail recursion
@@ -80,38 +89,42 @@ impl PriorityQueue {
     /// Access the next item without removing it from the queue.
     /// It is a logical error to modify the item returned by this method in such a way that its
     /// comparison value would change.
-    fn peek(&self) -> Option<&Py<PyAny>> {
-        self.root.map(|ref root_node| {
-            let mut next = root_node.read().unwrap();
-            while let Some(right_node) = &next.right {
-                next = right_node.read().unwrap();
-            };
-            next
-        }).map(|node| &node.item)
+    fn peek(&self) -> Option<Py<PyAny>> {
+        self.root.as_deref().map(|root| {
+            let root = root.read().unwrap();
+
+            let mut next = &*root;
+            while let Some(right_node) = next.right.as_deref() {
+                next = right_node;
+            }
+
+            Py::clone(&next.item)
+        })
     }
 
-    fn __contains__(&self, py: Python<'_>, item: &PyAny) -> PyResult<bool> {
-        let value = self.get_comparison_value_for(item)?;
-        let mut next = &self.root;
-        while let Some(node) = next {
-            let node = node.read().unwrap();
-            match value.as_ref(py).compare(&node.value)? {
-                Less => next = &node.left,
-                Greater => next = &node.right,
-                Equal => return Ok(true), // We found a match
-            };
-        };
-        Ok(false)
-    }
+    // fn __contains__(&self, py: Python<'_>, item: &PyAny) -> PyResult<bool> {
+    //     let value = self.get_comparison_value_for(item)?;
+    //     let mut next = self.root.as_ref().map(|root| root.read().unwrap());
+    //     let root = 
+    //     while let Some(node) = next {
+    //         let node = node.read().unwrap();
+    //         match value.as_ref(py).compare(&node.value)? {
+    //             Less => next = &node.left,
+    //             Greater => next = &node.right,
+    //             Equal => return Ok(true), // We found a match
+    //         };
+    //     };
+    //     Ok(false)
+    // }
 
     /// Ez impl by calling __delitem__ when it is impled
     fn remove(&mut self) { todo!() }
 
-    fn __getitem__(&self, index: usize) -> PyResult<Py<PyAny>> {
-        self.into_iter().nth(index).ok_or(PyIndexError::new_err(
-            format!("Index: {index} out of range!")
-        ))
-    }
+    // fn __getitem__(&self, index: usize) -> PyResult<Py<PyAny>> {
+    //     self.into_iter().nth(index).ok_or(PyIndexError::new_err(
+    //         format!("Index: {index} out of range!")
+    //     ))
+    // }
 
     fn __len__(&self) -> usize {
         self.length
@@ -127,62 +140,67 @@ impl IntoIterator for &PriorityQueue {
     type IntoIter = IntoIter;
 
     fn into_iter(self) -> Self::IntoIter {
-        let mut stack = Vec::with_capacity(self.length);
+        match &self.root {
+            Some(root) => {
+                let mut stack: Vec<*const Node> = Vec::with_capacity(self.length);
 
-        // Iter will do the rest
-        if let Some(root_node) = self.root {
-            stack.push((false, Arc::clone(&root_node), false));
+                let mut next = &*root.read().unwrap();
+                stack.push(next);
+                while let Some(right_node) = next.right.as_deref() {
+                    stack.push(right_node);
+                    next = right_node;
+                }
+
+                IntoIter {
+                    lock: Some(Arc::clone(&root)),
+                    stack,
+                }
+            },
+            None => IntoIter { lock: None, stack: Vec::new() }
         }
-        // if explored false then add the nodes in the left path, the current node, and then the nodes in the right
-        // path to the stack, explored is only one bool and prob should go after the node in the tupil. Muetex should
-        // be able to restore mutability.
-        
-        IntoIter { stack }
     }
 }
 
 #[pyclass]
 struct IntoIter {
-    stack: Vec<(bool, WNode, bool)>,
+    lock: Option<Arc<RwLock<Node>>>,
+    stack: Vec<*const Node>,
 }
+unsafe impl Send for IntoIter {}
 
 impl Iterator for IntoIter {
     type Item = Py<PyAny>;
 
     fn next(&mut self) -> Option<Py<PyAny>> {
-        self.stack.pop().map(|(explored_left, node, explored_right)| {
-            if !explored_right {
-                self.stack.push((explored_left, node, true));
+        if let Some(node) = self.stack.pop() {
+            let _lock = unsafe {
+                // SAFETY: We popped a node which, due to the into iter code, means lock is not None
+                self.lock.as_ref().unwrap_unchecked().read().unwrap()
+            };
+            // From here until the lock is dropped the tree should be safely readable
+            
+            // Find the next greatest node
+            unsafe {
+                let mut next = (*node).left.as_deref();
 
-                let mut next = node.right.as_ref();
+                // Explore right
                 while let Some(right_node) = next {
-                    self.stack.push((false, Arc::clone(&right_node), true));
-                    next = right_node.right.as_ref();
-                }
-
-                unsafe {
-                    // SAFETY: We just pushed a node on above so we can pop off at least one
-                    return Py::clone(&self.stack.pop().unwrap_unchecked().1.item);
+                    self.stack.push(right_node);
+                    next = right_node.right.as_deref();
                 }
             }
-            if !explored_left {
-                let slice_start = self.stack.len();
-                let mut slice_end = slice_start;
 
-                let mut next = node.left.as_ref();
-                while let Some(left_node) = next {
-                    self.stack.push((true, Arc::clone(&left_node), false));
-                    next = left_node.left.as_ref();
-                    slice_end += 1;
-                }
-                self.stack[slice_start..slice_end].reverse(); // So they are popped off the stack in the right order
-
-                return Py::clone(&node.item);
-            }
-            panic!()
-        })
+            unsafe {
+                Some(Py::clone(&(*node).item)) // Should always be the greatest
+            } 
+        } else {
+            // The iteration is over
+            self.lock = None; // Release the lock, allowing the tree to be cleaned up if it is the last Arc
+            None
+        }
     }
 }
+impl FusedIterator for IntoIter {}
 
 #[pymethods]
 impl IntoIter {
@@ -190,11 +208,10 @@ impl IntoIter {
         self.next()
     }
 
-    fn __iter__(&self) -> &Self {
-        self
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
     }
 }
-
 
 /// Rust only
 impl PriorityQueue {
@@ -205,18 +222,6 @@ impl PriorityQueue {
             None => item.into_py(py),
         })
     }
-
-    /// Returns a ref to the node with the highest value in the tree
-    fn greatest_node(&self) -> Option<&Node> {
-
-    }
-}
-
-impl Node {
-    #[allow(dead_code)]
-    fn is_leaf(&self) -> bool {
-        self.left.is_none() && self.right.is_none()
-    }
 }
 
 /// A Python module implemented in Rust.
@@ -224,4 +229,40 @@ impl Node {
 fn python_extension(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<PriorityQueue>()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod test {
+    use super::PriorityQueue;
+    use pyo3::conversion::ToPyObject;
+    use pyo3::Python;
+
+    #[test]
+    fn iter() {
+        let mut queue = PriorityQueue::new(None);
+        
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            queue.push(5.to_object(py).as_ref(py)).unwrap();
+            queue.push(0.to_object(py).as_ref(py)).unwrap();
+            queue.push(10.to_object(py).as_ref(py)).unwrap();
+            queue.push(10.to_object(py).as_ref(py)).unwrap();
+            queue.push(10.5.to_object(py).as_ref(py)).unwrap();
+            queue.push(5.to_object(py).as_ref(py)).unwrap();
+            queue.push(3.to_object(py).as_ref(py)).unwrap();
+            queue.push(6.to_object(py).as_ref(py)).unwrap();
+            queue.push(2.to_object(py).as_ref(py)).unwrap();
+
+            let mut queue_iter = queue.__iter__();
+            assert_eq!(10.5, queue_iter.next().unwrap().extract(py).unwrap());
+            assert_eq!(10, queue_iter.next().unwrap().extract(py).unwrap());
+            assert_eq!(10, queue_iter.next().unwrap().extract(py).unwrap());
+            assert_eq!(6, queue_iter.next().unwrap().extract(py).unwrap());
+            assert_eq!(5, queue_iter.next().unwrap().extract(py).unwrap());
+            assert_eq!(5, queue_iter.next().unwrap().extract(py).unwrap());
+            assert_eq!(3, queue_iter.next().unwrap().extract(py).unwrap());
+            assert_eq!(2, queue_iter.next().unwrap().extract(py).unwrap());
+            assert_eq!(0, queue_iter.next().unwrap().extract(py).unwrap());
+        });
+    }
 }
