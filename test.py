@@ -4,13 +4,18 @@ import unittest
 
 class Test(unittest.TestCase):
     def test_indexing(self):
-        self.queue.push(5)
         self.queue.push(7)
-        self.queue.push(3)
+        self.queue.push(9)
+        self.queue.push(4)
+        self.queue.push(5)
+        self.queue.push(4)
 
-        self.assertEqual(7, self.queue[0])
-        self.assertEqual(5, self.queue[1])
-        self.assertEqual(3, self.queue[2])
+        self.assertEqual(9, self.queue[0])
+        self.assertEqual(7, self.queue[1])
+        self.assertEqual(5, self.queue[2])
+        self.assertEqual(4, self.queue[3])
+        self.assertEqual(4, self.queue[4])
+        self.assertRaises(IndexError, self.queue.__getitem__, 5)
 
     def test_length_tracking(self):
         self.assertEqual(0, len(self.queue))

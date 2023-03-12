@@ -74,8 +74,12 @@ impl PriorityQueue {
         Ok(())
     }
 
-    // /// Pops the next item off the queue
-    // fn pop(&mut self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> { todo!() }
+    /// Pops the next item off the queue
+    fn pop(&mut self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        // Getting the parent node will prob be the hardest part of impling this and I dont think that will actually
+        // be hard
+        todo!()
+    }
     
     fn clear(&mut self) { 
         self.root = None; // Fine for now, may be tail recursion
@@ -121,7 +125,7 @@ impl PriorityQueue {
     fn remove(&mut self) { todo!() }
 
     // fn __getitem__(&self, index: usize) -> PyResult<Py<PyAny>> {
-    //     self.into_iter().nth(index).ok_or(PyIndexError::new_err(
+    //     self.into_iter().nth(index).ok_or_else(|| PyIndexError::new_err(
     //         format!("Index: {index} out of range!")
     //     ))
     // }
@@ -142,6 +146,7 @@ impl IntoIterator for &PriorityQueue {
     fn into_iter(self) -> Self::IntoIter {
         match &self.root {
             Some(root) => {
+                // If the tree was height-balanced this capacity could be smaller
                 let mut stack: Vec<*const Node> = Vec::with_capacity(self.length);
 
                 let mut next = &*root.read().unwrap();
