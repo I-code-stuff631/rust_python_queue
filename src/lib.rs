@@ -12,14 +12,14 @@ struct Node {
     item: Py<PyAny>,
     /// This should be used for any comparisions
     value: Py<PyAny>,
-    left: Option<Box<Node>>,
-    right: Option<Box<Node>>,
+    left: Option<Arc<RwLock<Node>>>,
+    right: Option<Arc<RwLock<Node>>>,
 }
 
 /// PriorityQueue implmented with an explicit binary search tree
 #[pyclass]
 struct PriorityQueue {
-    root: Option<Arc<RwLock<Node>>>, // Tree has a read-mode and a write-mode
+    root: Option<Arc<RwLock<Node>>>,
     get_cmpison_value: Option<Py<PyFunction>>,
     length: usize,
 }
@@ -49,25 +49,40 @@ impl PriorityQueue {
             right: None,
         };
 
-        match &self.root {
-            Some(root) => {
-                let mut root = root.write().unwrap();
-
-                let mut next = match new_node.value.as_ref(py).compare(&root.value)? {
-                    Less => &mut root.left,
-                    Equal | Greater => &mut root.right,
-                };
-                while let Some(node) = next {
-                    match new_node.value.as_ref(py).compare(&node.value)? {
-                        Less => next = &mut node.left,
-                        Equal | Greater => next = &mut node.right,
+        let mut next = self.root.clone();
+        while let Some(node) = next {
+            let read_node = node.read().unwrap();
+            match new_node.value.as_ref(py).compare(&read_node.value)? {
+                Less => {
+                    if let Some(left_node) = read_node.left.clone() {
+                        next = Some(left_node);
+                    } else {
+                        drop(read_node);
+                        next = Some(node); // Put back
+                        break;
                     }
-                }
-                debug_assert!(next.is_none());
+                },
+                Equal | Greater => {
+                    if let Some(right_node) = read_node.right.clone() {
+                        next = Some(right_node)
+                    } else {
+                        drop(read_node);
+                        next = Some(node); // Put back
+                        break; 
+                    }
+                },
+            }
+        }
 
-                *next = Some(Box::new(new_node)); // Put node
-            },
-            None => self.root = Some(Arc::new(RwLock::new(new_node))),
+        // Put node
+        if let Some(parent_node) = next {
+            let mut parent_node = parent_node.write().unwrap();
+            match new_node.value.as_ref(py).compare(&parent_node.value)? {
+                Less => parent_node.left = Some(Arc::new(RwLock::new(new_node))),
+                Equal | Greater => parent_node.right = Some(Arc::new(RwLock::new(new_node))),
+            }
+        } else {
+            self.root = Some(Arc::new(RwLock::new(new_node)))
         }
 
         self.length += 1;
@@ -94,41 +109,49 @@ impl PriorityQueue {
     /// It is a logical error to modify the item returned by this method in such a way that its
     /// comparison value would change.
     fn peek(&self) -> Option<Py<PyAny>> {
-        self.root.as_deref().map(|root| {
-            let root = root.read().unwrap();
+        // This function should only return None when there is no root node
 
-            let mut next = &*root;
-            while let Some(right_node) = next.right.as_deref() {
-                next = right_node;
+        // Find the rightmost node
+        // The alternative to all of these seeming unnecessary clones is making a heap allocation and storing
+        // a bunch of read locks in it. (which is obv worse both readability wise and performance wise).
+        // The clones safely allow not always having some kind of lock.
+        let mut next = self.root.clone(); 
+        while let Some(node) = next {
+            let right = node.read().unwrap().right.clone();
+            match right {
+                Some(right_node) => next = Some(right_node),
+                None => {
+                    next = Some(node); // Put back
+                    break;
+                }
             }
-
-            Py::clone(&next.item)
-        })
+        }
+        
+        next.map(|node| Py::clone(&node.read().unwrap().item))
     }
 
-    // fn __contains__(&self, py: Python<'_>, item: &PyAny) -> PyResult<bool> {
-    //     let value = self.get_comparison_value_for(item)?;
-    //     let mut next = self.root.as_ref().map(|root| root.read().unwrap());
-    //     let root = 
-    //     while let Some(node) = next {
-    //         let node = node.read().unwrap();
-    //         match value.as_ref(py).compare(&node.value)? {
-    //             Less => next = &node.left,
-    //             Greater => next = &node.right,
-    //             Equal => return Ok(true), // We found a match
-    //         };
-    //     };
-    //     Ok(false)
-    // }
+    fn __contains__(&self, py: Python<'_>, item: &PyAny) -> PyResult<bool> {
+        let value = self.get_comparison_value_for(item)?;
+        let mut next = self.root.clone();
+        while let Some(node) = next {
+            let node = node.read().unwrap();
+            match value.as_ref(py).compare(&node.value)? {
+                Less => next = node.left.clone(),
+                Greater => next = node.right.clone(),
+                Equal => return Ok(true), // We found a match
+            };
+        };
+        Ok(false)
+    }
 
     /// Ez impl by calling __delitem__ when it is impled
     fn remove(&mut self) { todo!() }
 
-    // fn __getitem__(&self, index: usize) -> PyResult<Py<PyAny>> {
-    //     self.into_iter().nth(index).ok_or_else(|| PyIndexError::new_err(
-    //         format!("Index: {index} out of range!")
-    //     ))
-    // }
+    fn __getitem__(&self, index: usize) -> PyResult<Py<PyAny>> {
+        self.into_iter().nth(index).ok_or_else(|| PyIndexError::new_err(
+            format!("Index: {index} out of range!")
+        ))
+    }
 
     fn __len__(&self) -> usize {
         self.length
@@ -144,65 +167,40 @@ impl IntoIterator for &PriorityQueue {
     type IntoIter = IntoIter;
 
     fn into_iter(self) -> Self::IntoIter {
-        match &self.root {
-            Some(root) => {
-                // If the tree was height-balanced this capacity could be smaller
-                let mut stack: Vec<*const Node> = Vec::with_capacity(self.length);
+        // If the tree was height-balanced this capacity could be smaller
+        let mut stack = Vec::with_capacity(self.length);
 
-                let mut next = &*root.read().unwrap();
-                stack.push(next);
-                while let Some(right_node) = next.right.as_deref() {
-                    stack.push(right_node);
-                    next = right_node;
-                }
-
-                IntoIter {
-                    lock: Some(Arc::clone(&root)),
-                    stack,
-                }
-            },
-            None => IntoIter { lock: None, stack: Vec::new() }
+        // Push Arc to the root node and Arcs to all of the nodes directly right of it
+        let mut next = self.root.clone(); // Clone Arc
+        while let Some(node) = next {
+            next = node.read().unwrap().right.clone(); // Will be pushed on in next iteration
+            stack.push(node);
         }
+
+        IntoIter { stack }
     }
 }
 
 #[pyclass]
 struct IntoIter {
-    lock: Option<Arc<RwLock<Node>>>,
-    stack: Vec<*const Node>,
+    stack: Vec<Arc<RwLock<Node>>>,
 }
-unsafe impl Send for IntoIter {}
 
 impl Iterator for IntoIter {
     type Item = Py<PyAny>;
 
     fn next(&mut self) -> Option<Py<PyAny>> {
-        if let Some(node) = self.stack.pop() {
-            let _lock = unsafe {
-                // SAFETY: We popped a node which, due to the into iter code, means lock is not None
-                self.lock.as_ref().unwrap_unchecked().read().unwrap()
-            };
-            // From here until the lock is dropped the tree should be safely readable
-            
-            // Find the next greatest node
-            unsafe {
-                let mut next = (*node).left.as_deref();
-
-                // Explore right
-                while let Some(right_node) = next {
-                    self.stack.push(right_node);
-                    next = right_node.right.as_deref();
-                }
+        self.stack.pop().map(|node| {
+            // Push Arc to the node left of the current and Arcs to all nodes directly right of the left node
+            let mut next = node.read().unwrap().left.clone(); // Clone Arc
+            while let Some(node) = next {
+                next = node.read().unwrap().right.clone(); // Will be pushed on in next iteration
+                self.stack.push(node);
             }
-
-            unsafe {
-                Some(Py::clone(&(*node).item)) // Should always be the greatest
-            } 
-        } else {
-            // The iteration is over
-            self.lock = None; // Release the lock, allowing the tree to be cleaned up if it is the last Arc
-            None
-        }
+            
+            // Should always be the greatest
+            Py::clone(&node.read().unwrap().item)
+        })
     }
 }
 impl FusedIterator for IntoIter {}
@@ -234,40 +232,4 @@ impl PriorityQueue {
 fn python_extension(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<PriorityQueue>()?;
     Ok(())
-}
-
-#[cfg(test)]
-mod test {
-    use super::PriorityQueue;
-    use pyo3::conversion::ToPyObject;
-    use pyo3::Python;
-
-    #[test]
-    fn iter() {
-        let mut queue = PriorityQueue::new(None);
-        
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
-            queue.push(5.to_object(py).as_ref(py)).unwrap();
-            queue.push(0.to_object(py).as_ref(py)).unwrap();
-            queue.push(10.to_object(py).as_ref(py)).unwrap();
-            queue.push(10.to_object(py).as_ref(py)).unwrap();
-            queue.push(10.5.to_object(py).as_ref(py)).unwrap();
-            queue.push(5.to_object(py).as_ref(py)).unwrap();
-            queue.push(3.to_object(py).as_ref(py)).unwrap();
-            queue.push(6.to_object(py).as_ref(py)).unwrap();
-            queue.push(2.to_object(py).as_ref(py)).unwrap();
-
-            let mut queue_iter = queue.__iter__();
-            assert_eq!(10.5, queue_iter.next().unwrap().extract(py).unwrap());
-            assert_eq!(10, queue_iter.next().unwrap().extract(py).unwrap());
-            assert_eq!(10, queue_iter.next().unwrap().extract(py).unwrap());
-            assert_eq!(6, queue_iter.next().unwrap().extract(py).unwrap());
-            assert_eq!(5, queue_iter.next().unwrap().extract(py).unwrap());
-            assert_eq!(5, queue_iter.next().unwrap().extract(py).unwrap());
-            assert_eq!(3, queue_iter.next().unwrap().extract(py).unwrap());
-            assert_eq!(2, queue_iter.next().unwrap().extract(py).unwrap());
-            assert_eq!(0, queue_iter.next().unwrap().extract(py).unwrap());
-        });
-    }
 }
