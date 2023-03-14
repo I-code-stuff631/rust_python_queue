@@ -54,28 +54,32 @@ impl PriorityQueue {
 
         match &self.root {
             Some(root_node) => {
-                let mut next = Some(Arc::clone(root_node));
+                let mut next = Some(Arc::as_ptr(root_node));
                 while let Some(node) = next {
-                    let node_readlock = node.read().unwrap();
+                    // SAFETY: We never decrease any of the Arcs strong counts to zero and since we take '&mut self'
+                    // nothing else can decrease them to zero either (or do anything with the tree at all for that matter).
+                    unsafe {
+                        let node_readlock = (*node).read().unwrap();
 
-                    match new_node.value.as_ref(py).compare(&node_readlock.value)? {
-                        Less => match node_readlock.left.clone() {
-                            Some(left_node) => next = Some(left_node),
-                            None => {
-                                drop(node_readlock); // Otherwise it would deadlock
-                                node.write().unwrap().left = Some(Arc::new(RwLock::new(new_node)));
-                                break;
-                            },
+                        match new_node.value.as_ref(py).compare(&node_readlock.value)? {
+                            Less => match &node_readlock.left {
+                                Some(left_node) => next = Some(Arc::as_ptr(left_node)),
+                                None => {
+                                    drop(node_readlock); // Otherwise it would deadlock
+                                    (*node).write().unwrap().left = Some(Arc::new(RwLock::new(new_node)));
+                                    break;
+                                },
+                            }
+                            Equal | Greater => match &node_readlock.right {
+                                Some(right_node) => next = Some(Arc::as_ptr(right_node)),
+                                None => {
+                                    drop(node_readlock); // Otherwise it would deadlock
+                                    (*node).write().unwrap().right = Some(Arc::new(RwLock::new(new_node)));
+                                    break;
+                                },
+                            }
                         }
-                        Equal | Greater => match node_readlock.right.clone() {
-                            Some(right_node) => next = Some(right_node),
-                            None => {
-                                drop(node_readlock); // Otherwise it would deadlock
-                                node.write().unwrap().right = Some(Arc::new(RwLock::new(new_node)));
-                                break;
-                            },
-                        }
-                    }
+                    };
                 }
             },
             None => self.root = Some(Arc::new(RwLock::new(new_node))),
