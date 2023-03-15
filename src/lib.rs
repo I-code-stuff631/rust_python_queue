@@ -17,7 +17,7 @@ struct Node {
 }
 
 /// PriorityQueue implmented with an explicit binary search tree
-#[pyclass]
+#[pyclass(sequence)]
 struct PriorityQueue {
     root: Option<Arc<RwLock<Node>>>,
     get_cmpison_value: Option<Py<PyFunction>>,
@@ -104,22 +104,26 @@ impl PriorityQueue {
         self.root.is_none()
     }
 
-    /// Access the next item without removing it from the queue.
+    /// Access the next item without removing it from the queue, this method will return None
+    /// only if the queue is completely empty.
     /// It is a logical error to modify the item returned by this method in such a way that its
     /// comparison value would change.
-    /// This method makes an effort to get the greatest item in the queue, however since in other
-    /// threads 
     fn peek(&self) -> Option<Py<PyAny>> {
-        let mut next = self.root.clone(); 
-        while let Some(node) = &next {
-            let right = node.read().unwrap().right.clone();
-            match right {
-                Some(right_node) => next = Some(right_node),
-                None => break,
+        fn rightmost_item_from(node: &Node) -> Py<PyAny> {
+            match &node.right {
+                Some(right_node) => {
+                    let readlock = right_node.read().unwrap();
+                    rightmost_item_from(&*readlock)
+                },
+                None => Py::clone(&node.item),
             }
         }
-        
-        next.map(|node| Py::clone(&node.read().unwrap().item))
+
+        self.root.as_ref().map(|root_node| {
+            let node_readlock = root_node.read().unwrap();
+            // I am making the same assumption here as I am for __contains__
+            rightmost_item_from(&*node_readlock)
+        })
     }
 
     /// This function should return true or false only when it is absolutely certain that the item does or does
@@ -127,7 +131,7 @@ impl PriorityQueue {
     /// from the root).
     fn __contains__(&self, py: Python<'_>, item: &PyAny) -> PyResult<bool> {
         let value = self.get_comparison_value_for(item)?;
-        
+
         fn rsearch(value: &PyAny, node: &Node) -> PyResult<bool> {
             match value.compare(&node.value)? {
                 Less => match &node.left {
