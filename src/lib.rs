@@ -5,7 +5,6 @@ use pyo3::exceptions::PyIndexError;
 #[allow(unused_imports)]
 use std::cmp::Ordering::*;
 use std::sync::{Arc, RwLock, Weak};
-use std::iter::FusedIterator;
 
 
 struct Node {
@@ -108,6 +107,8 @@ impl PriorityQueue {
     /// Access the next item without removing it from the queue.
     /// It is a logical error to modify the item returned by this method in such a way that its
     /// comparison value would change.
+    /// This method makes an effort to get the greatest item in the queue, however since in other
+    /// threads 
     fn peek(&self) -> Option<Py<PyAny>> {
         let mut next = self.root.clone(); 
         while let Some(node) = &next {
@@ -121,18 +122,42 @@ impl PriorityQueue {
         next.map(|node| Py::clone(&node.read().unwrap().item))
     }
 
+    /// This function should return true or false only when it is absolutely certain that the item does or does
+    /// not exist within the tree respectively (an item existing in the tree is defined as it being reachable
+    /// from the root).
     fn __contains__(&self, py: Python<'_>, item: &PyAny) -> PyResult<bool> {
         let value = self.get_comparison_value_for(item)?;
-        let mut next = self.root.clone();
-        while let Some(node) = next {
-            let node = node.read().unwrap();
-            match value.as_ref(py).compare(&node.value)? {
-                Less => next = node.left.clone(),
-                Greater => next = node.right.clone(),
-                Equal => return Ok(true),
-            };
-        };
-        Ok(false)
+        
+        fn rsearch(value: &PyAny, node: &Node) -> PyResult<bool> {
+            match value.compare(&node.value)? {
+                Less => match &node.left {
+                    Some(left_node) => {
+                        let readlock = left_node.read().unwrap();
+                        rsearch(value, &*readlock)
+                    },
+                    None => Ok(false),
+                },
+                Equal => Ok(true),
+                Greater => match &node.right {
+                    Some(right_node) => {
+                        let readlock = right_node.read().unwrap();
+                        rsearch(value, &*readlock)
+                    },
+                    None => Ok(false),
+                },
+            }
+        }
+        match &self.root {
+            Some(root_node) => {
+                let node_readlock = root_node.read().unwrap();
+                // Im using the call stack here to avoid allocating a bunch of readlocks on the heap,
+                // instead they are being allocated on the stack. I am assuming that if the tree
+                // is height balanced the call stack will seldom grow large enough to crash the program.
+                // If this assumption proves to be false in practise I will use a heap allocation instead.
+                rsearch(value.as_ref(py), &*node_readlock)
+            },
+            None => Ok(false),
+        }
     }
 
     /// Ez impl by calling __delitem__ when it is impled
@@ -220,7 +245,7 @@ impl Iterator for IntoIter {
 //     //     (self.length, Some(self.length))
 //     // }
 // }
-// impl FusedIterator for IntoIter {}
+// impl std::iter::FusedIterator for IntoIter {}
 
 #[pymethods]
 impl IntoIter {
