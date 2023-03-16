@@ -1,4 +1,3 @@
-use pyo3::intern;
 use pyo3::{prelude::*, types::PyFunction};
 #[allow(unused_imports)]
 use pyo3::exceptions::PyIndexError;
@@ -88,8 +87,8 @@ impl PriorityQueue {
         Ok(())
     }
 
-    /// Pops the next item off the queue
-    fn pop(&mut self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+    /// Pops the next item off the queue, will return None if the queue is empty
+    fn pop(&mut self) -> Option<Py<PyAny>> {
         // Getting the parent node will prob be the hardest part of impling this and I dont think that will actually
         // be hard
         todo!()
