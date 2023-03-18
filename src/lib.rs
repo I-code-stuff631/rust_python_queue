@@ -3,7 +3,8 @@ use pyo3::{prelude::*, types::PyFunction};
 use pyo3::exceptions::PyIndexError;
 #[allow(unused_imports)]
 use std::cmp::Ordering::*;
-use std::sync::{Arc, RwLock, Weak};
+use std::rc::Rc;
+use std::cell::RefCell;
 
 
 struct Node {
@@ -11,14 +12,14 @@ struct Node {
     item: Py<PyAny>,
     /// This should be used for any comparisions
     value: Py<PyAny>,
-    left: Option<Arc<RwLock<Node>>>,
-    right: Option<Arc<RwLock<Node>>>,
+    left: Option<Rc<RefCell<Node>>>,
+    right: Option<Rc<RefCell<Node>>>,
 }
 
 /// PriorityQueue implmented with an explicit binary search tree
-#[pyclass(sequence)]
+#[pyclass(sequence, unsendable)]
 struct PriorityQueue {
-    root: Option<Arc<RwLock<Node>>>,
+    root: Option<Rc<RefCell<Node>>>,
     get_cmpison_value: Option<Py<PyFunction>>,
     length: usize,
 }
@@ -39,10 +40,7 @@ impl PriorityQueue {
     /// Pushes the specified item onto the queue.
     /// It is a logical error to modify the item in such a way that its comparison value
     /// would change after it has been pushed.
-    /// This method guarantees that the item will be pushed onto the tree will actually be pushed on
-    /// (and not deallocated as soon as it returns).
-    fn push(&mut self, item: &PyAny) -> PyResult<()>{
-        let py = item.py();
+    fn push(&mut self, py: Python<'_>, item: &PyAny) -> PyResult<()>{
         let new_node = Node {
             item: item.into_py(py),
             value: self.get_comparison_value_for(item)?,
@@ -52,47 +50,44 @@ impl PriorityQueue {
 
         match &self.root {
             Some(root_node) => {
-                let mut next = Some(Arc::as_ptr(root_node));
-                while let Some(node) = next {
-                    // SAFETY: We never decrease any of the Arcs strong counts to zero and since we take '&mut self'
-                    // nothing else can decrease them to zero either (or do anything with the tree at all for that matter).
-                    unsafe {
-                        let node_readlock = (*node).read().unwrap();
-
-                        match new_node.value.as_ref(py).compare(&node_readlock.value)? {
-                            Less => match &node_readlock.left {
-                                Some(left_node) => next = Some(Arc::as_ptr(left_node)),
-                                None => {
-                                    drop(node_readlock); // Otherwise it would deadlock
-                                    (*node).write().unwrap().left = Some(Arc::new(RwLock::new(new_node)));
-                                    break;
-                                },
-                            }
-                            Equal | Greater => match &node_readlock.right {
-                                Some(right_node) => next = Some(Arc::as_ptr(right_node)),
-                                None => {
-                                    drop(node_readlock); // Otherwise it would deadlock
-                                    (*node).write().unwrap().right = Some(Arc::new(RwLock::new(new_node)));
-                                    break;
-                                },
-                            }
-                        }
+                let mut next = Rc::as_ptr(root_node);
+                loop {
+                    let mut node = unsafe {
+                        // SAFETY: We never decrease any Rcs strong counts to zero (or at all)
+                        (*next).borrow_mut()
                     };
-                }
+                    next = match new_node.value.as_ref(py).compare(&node.value)? {
+                        Less => match &node.left {
+                            Some(left_node) => Rc::as_ptr(left_node),
+                            None => {
+                                node.left = Some(Rc::new(RefCell::new(new_node)));
+                                break;
+                            },
+                        }
+                        Equal | Greater => match &node.right {
+                            Some(right_node) => Rc::as_ptr(right_node),
+                            None => {
+                                node.right = Some(Rc::new(RefCell::new(new_node)));
+                                break;
+                            },
+                        }
+                    }
+                };
+
             },
-            None => self.root = Some(Arc::new(RwLock::new(new_node))),
+            None => self.root = Some(Rc::new(RefCell::new(new_node))),
         }
 
         self.length += 1;
         Ok(())
     }
 
-    /// Pops the next item off the queue, will return None if the queue is empty
-    fn pop(&mut self) -> Option<Py<PyAny>> {
-        // Getting the parent node will prob be the hardest part of impling this and I dont think that will actually
-        // be hard
-        todo!()
-    }
+    // /// Pops the next item off the queue, will return None if the queue is empty
+    // fn pop(&mut self) -> Option<Py<PyAny>> {
+    //     // Getting the parent node will prob be the hardest part of impling this and I dont think that will actually
+    //     // be hard
+    //     todo!()
+    // }
     
     fn clear(&mut self) { 
         self.root = None;
@@ -103,68 +98,38 @@ impl PriorityQueue {
         self.root.is_none()
     }
 
-    /// Access the next item without removing it from the queue, this method will return None
-    /// only if the queue is completely empty.
-    /// It is a logical error to modify the item returned by this method in such a way that its
-    /// comparison value would change.
-    fn peek(&self) -> Option<Py<PyAny>> {
-        fn rightmost_item_from(node: &Node) -> Py<PyAny> {
-            match &node.right {
-                Some(right_node) => {
-                    let readlock = right_node.read().unwrap();
-                    rightmost_item_from(&*readlock)
-                },
-                None => Py::clone(&node.item),
-            }
-        }
+    // /// Access the next item without removing it from the queue, this method will return None if the queue 
+    // /// is empty.
+    // /// It is a logical error to modify the item returned by this method in such a way that its
+    // /// comparison value would change.
+    // fn peek(&self) -> Option<Py<PyAny>> {
+    //     self.root.as_ref().map(|root_node| {
+    //         unsafe {
+    //             let mut next = root_node.try_borrow_unguarded().expect("Nothing should have a RefMut to this node");
+    //             let root_node = (); // Could be used to deallocate parts of the tree that are being looped over
 
-        self.root.as_ref().map(|root_node| {
-            let node_readlock = root_node.read().unwrap();
-            // I am making the same assumption here as I am for __contains__
-            rightmost_item_from(&*node_readlock)
-        })
-    }
+    //             while let Some(right_node) = &next.right {
+    //                 next = right_node.try_borrow_unguarded().expect("Nothing should have a RefMut to this node");
+    //                 // root_node.borrow_mut().right = None; // SAFETY: The ref just died (except this causes UB)
+    //             }
+    //             Py::clone(&next.item)
+    //         }
+    //     })
+    // }
 
-    /// This function should return true or false only when it is absolutely certain that the item does or does
-    /// not exist within the tree respectively (an item existing in the tree is defined as it being reachable
-    /// from the root).
-    fn __contains__(&self, py: Python<'_>, item: &PyAny) -> PyResult<bool> {
-        let value = self.get_comparison_value_for(item)?;
+    // fn __contains__(&self, py: Python<'_>, item: &PyAny) -> PyResult<bool> {
+    //     let value = self.get_comparison_value_for(item)?;
 
-        fn rsearch(value: &PyAny, node: &Node) -> PyResult<bool> {
-            match value.compare(&node.value)? {
-                Less => match &node.left {
-                    Some(left_node) => {
-                        let readlock = left_node.read().unwrap();
-                        rsearch(value, &*readlock)
-                    },
-                    None => Ok(false),
-                },
-                Equal => Ok(true),
-                Greater => match &node.right {
-                    Some(right_node) => {
-                        let readlock = right_node.read().unwrap();
-                        rsearch(value, &*readlock)
-                    },
-                    None => Ok(false),
-                },
-            }
-        }
-        match &self.root {
-            Some(root_node) => {
-                let node_readlock = root_node.read().unwrap();
-                // Im using the call stack here to avoid allocating a bunch of readlocks on the heap,
-                // instead they are being allocated on the stack. I am assuming that if the tree
-                // is height balanced the call stack will seldom grow large enough to crash the program.
-                // If this assumption proves to be false in practise I will use a heap allocation instead.
-                rsearch(value.as_ref(py), &*node_readlock)
-            },
-            None => Ok(false),
-        }
-    }
+    //     match &self.root {
+    //         Some(root_node) => {
+                
+    //         },
+    //         None => Ok(false),
+    //     }
+    // }
 
-    /// Ez impl by calling __delitem__ when it is impled
-    fn remove(&mut self) { todo!() }
+    // /// Ez impl by calling __delitem__ when it is impled
+    // fn remove(&mut self) { todo!() }
 
     fn __len__(&self) -> usize {
         self.length
@@ -180,19 +145,23 @@ impl PriorityQueue {
         ))
     }
 
-    // fn __str__(&self, py: Python<'_>) -> PyResult<String> {
-    //     let mut string = String::with_capacity(2);
-    //     string.push('[');
-    //     let mut iter = self.into_iter();
-    //     while let Some(item) = iter.next() {
-    //         string.push_str(item.as_ref(py).str()?.to_str()?);
-    //         if iter.len() != 0 {
-    //             string.push_str(", ");
-    //         }
-    //     }
-    //     string.push(']');
-    //     Ok(string)
-    // }
+    fn __str__(&self, py: Python<'_>) -> PyResult<String> {
+        let mut string = String::with_capacity(2);
+        string.push('[');
+
+        let mut length_remaining = self.length;
+        let mut iter = self.into_iter();
+        while let Some(item) = iter.next() {
+            length_remaining -= 1;
+            string.push_str(item.as_ref(py).str()?.to_str()?);
+            if length_remaining != 0 { // Not the last item
+                string.push_str(", ")
+            }
+        }
+
+        string.push(']');
+        Ok(string)
+    }
 }
 
 impl IntoIterator for &PriorityQueue {
@@ -205,50 +174,38 @@ impl IntoIterator for &PriorityQueue {
 
         let mut next = self.root.clone();
         while let Some(node) = next {
-            next = node.read().unwrap().right.clone(); // Will be pushed on in next iteration
+            next = (*node).borrow().right.clone(); // Will be pushed on in next iteration
             stack.push(node);
         }
 
-        IntoIter { stack/*, length: self.length*/ }
+        IntoIter { stack }
     }
 }
 
-#[pyclass]
+#[pyclass(unsendable)]
 struct IntoIter {
-    stack: Vec<Arc/*Week*/<RwLock<Node>>>,
-    // length: usize,
+    stack: Vec<Rc<RefCell<Node>>>,
 }
 
 impl Iterator for IntoIter {
     type Item = Py<PyAny>;
 
-    fn next(&mut self) -> Option<Self::Item> {
-        todo!()
+    fn next(&mut self) -> Option<Py<PyAny>> {
+        self.stack.pop().map(|node| {
+            let node = (*node).borrow();
+
+            let mut next = node.left.clone();
+            while let Some(node) = next {
+                next = (*node).borrow().right.clone(); // Will be pushed on in next iteration
+                self.stack.push(node);
+            }
+            
+            // Should always be the greatest
+            Py::clone(&node.item)
+        })
     }
 }
-
-// impl Iterator for IntoIter {
-//     type Item = Py<PyAny>;
-
-//     fn next(&mut self) -> Option<Py<PyAny>> {
-//         self.stack.pop().map(|node| {
-//             let mut next = node.read().unwrap().left.clone();
-//             while let Some(node) = next {
-//                 next = node.read().unwrap().right.clone(); // Will be pushed on in next iteration
-//                 self.stack.push(node);
-//             }
-            
-//             self.length -= 1;
-//             // Should always be the greatest
-//             Py::clone(&node.read().unwrap().item)
-//         })
-//     }
-
-//     // fn size_hint(&self) -> (usize, Option<usize>) {
-//     //     (self.length, Some(self.length))
-//     // }
-// }
-// impl std::iter::FusedIterator for IntoIter {}
+impl std::iter::FusedIterator for IntoIter {}
 
 #[pymethods]
 impl IntoIter {
