@@ -13,14 +13,40 @@ struct Node {
     /// This should be used for any comparisions
     value: Py<PyAny>,
     parent: Weak<RefCell<Node>>,
-    left: Option<Rc<RefCell<Node>>>,
-    right: Option<Rc<RefCell<Node>>>,
+    left: Option<WNode>,
+    right: Option<WNode>,
 }
+
+impl Node {
+    /// Returns the leftmost node from the passed node
+    fn leftmost(node: &WNode) -> WNode {
+        let mut next: *const Rc<RefCell<Node>> = node;
+        unsafe {
+            while let Some(left_node) = &(*next).borrow().left {
+                next = left_node;
+            }
+            Rc::clone(&*next)
+        }
+    }
+
+    /// Returns the rightmost node from the passed node
+    fn rightmost(node: &WNode) -> WNode {
+        let mut next: *const Rc<RefCell<Node>> = node;
+        unsafe {
+            while let Some(right_node) = &(*next).borrow().right {
+                next = right_node;
+            }
+            Rc::clone(&*next)
+        }
+    }
+}
+
+type WNode = Rc<RefCell<Node>>;
 
 /// PriorityQueue implmented with an explicit binary search tree
 #[pyclass(sequence, unsendable)]
 struct PriorityQueue {
-    root: Option<Rc<RefCell<Node>>>,
+    root: Option<WNode>,
     get_cmpison_value: Option<Py<PyFunction>>,
     length: usize,
 }
@@ -52,7 +78,7 @@ impl PriorityQueue {
 
         match &self.root {
             Some(root_node) => {
-                let mut next: *const Rc<RefCell<Node>> = root_node as *const _;
+                let mut next: *const Rc<RefCell<Node>> = root_node;
                 loop {
                     let mut node = unsafe {
                         // SAFETY: We do not decrease the strong count of any Rcs in the tree...
@@ -85,46 +111,25 @@ impl PriorityQueue {
         Ok(())
     }
 
-    // /// Pops the next item off the queue, will return None if the queue is empty
-    // fn pop(&mut self) -> Option<Py<PyAny>> {
-    //     // Getting the parent node will prob be the hardest part of impling this and I dont think that will actually
-    //     // be hard
-    //     todo!()
+    // /// Pops the next item off the queue, will return None if the queue is empty.
+    // fn pop(&mut self, index: usize) -> Option<Py<PyAny>> {
+    //     self.
     // }
-    
-    fn clear(&mut self) { 
-        self.root = None;
-        self.length = 0;
-     }
 
-    fn is_empty(&self) -> bool {
-        self.root.is_none()
+    /// Access the next item without removing it from the queue, this method will return None if the queue 
+    /// is empty.
+    /// It is a logical error to modify the item returned by this method in such a way that its
+    /// comparison value would change.
+    fn peek(&self) -> Option<Py<PyAny>> {
+        self.greatest_node().map(|node| Py::clone(&node.borrow().item))
     }
-
-    // /// Access the next item without removing it from the queue, this method will return None if the queue 
-    // /// is empty.
-    // /// It is a logical error to modify the item returned by this method in such a way that its
-    // /// comparison value would change.
-    // fn peek(&self) -> Option<Py<PyAny>> {
-    //     self.root.as_ref().map(|root_node| {
-    //         unsafe {
-    //             let mut next = root_node.try_borrow_unguarded().expect("Nothing should have a RefMut to this node");
-    //             let root_node = (); // Could be used to deallocate parts of the tree that are being looped over
-
-    //             while let Some(right_node) = &next.right {
-    //                 next = right_node.try_borrow_unguarded().expect("Nothing should have a RefMut to this node");
-    //                 // root_node.borrow_mut().right = None; // SAFETY: The ref just died (except this causes UB)
-    //             }
-    //             Py::clone(&next.item)
-    //         }
-    //     })
-    // }
 
     // fn __contains__(&self, py: Python<'_>, item: &PyAny) -> PyResult<bool> {
     //     let value = self.get_comparison_value_for(item)?;
 
     //     match &self.root {
     //         Some(root_node) => {
+
                 
     //         },
     //         None => Ok(false),
@@ -134,41 +139,120 @@ impl PriorityQueue {
     // /// Ez impl by calling __delitem__ when it is impled
     // fn remove(&mut self) { todo!() }
 
+    fn clear(&mut self) { 
+        self.root = None;
+        self.length = 0;
+     }
+
+    fn is_empty(&self) -> bool {
+        self.root.is_none()
+    }
+
     fn __len__(&self) -> usize {
         self.length
     }
 
-    fn __iter__(&self) -> IntoIter {
-        self.into_iter()
+    fn __iter__(&self) -> PyIter {
+        PyIter(self.into_iter())
+    }
+
+    fn __delitem__(&mut self, py: Python<'_>, index: usize) -> PyResult<()> {
+        let node_for_removal = if index == 0 {
+            self.greatest_node() // Saves an allocation
+        } else if index == self.length.saturating_sub(1) /*<< End of queue*/ { 
+            self.least_node() // Also saves an allocation
+        } else {
+            self.into_iter().nth(index)
+        }.ok_or_else(|| PyIndexError::new_err(format!("Index: {index} out of range!")))?;
+        // This is effectively a Ref because it is not declared as mut
+        let node_for_removal_ref = node_for_removal.borrow_mut();
+
+        match node_for_removal_ref.parent.upgrade() {
+            Some(parent_node) => {
+                let replacement = {
+                    let mut node_for_removal = node_for_removal_ref;
+                    if let Some(left_node) = node_for_removal.left.take() {
+                        match node_for_removal.right.take() {
+                            Some(right_node) => {
+                                Node::leftmost(&right_node).borrow_mut().left = Some(left_node);
+                                Some(right_node)
+                            },
+                            None => Some(left_node),
+                        }
+                    } else if let Some(right_node) = node_for_removal.right.take() {
+                        match node_for_removal.left.take() {
+                            Some(left_node) => {
+                                Node::leftmost(&right_node).borrow_mut().left = Some(left_node);
+                                Some(right_node)
+                            },
+                            None => Some(right_node),
+                        }
+                    } else {
+                        None
+                    }
+                };
+                // What side of its parent is node_for_removal on?
+                let mut parent_node = parent_node.borrow_mut();
+                if let Some(right_node) = parent_node.right.clone() {
+                    if Rc::ptr_eq(&node_for_removal, &right_node) { // It is on the right
+                        parent_node.right = replacement;
+                    } else { // It should be on the left
+                        debug_assert!(parent_node.left.is_some());
+                        parent_node.left = replacement;
+                    }
+                } else { // It should be on the left
+                    debug_assert!(parent_node.left.is_some());
+                    parent_node.left = replacement;
+                }              
+            }
+            None => { // The node for removal is the root node
+                let mut node_for_removal = node_for_removal_ref;
+                // If node for removal has a left or right node then it will be the new root
+                self.root = if let Some(new_root) = node_for_removal.left.take() {
+                    new_root.borrow_mut().parent = Weak::new();
+                    Node::rightmost(&new_root).borrow_mut().right = node_for_removal.right.take();
+                    Some(new_root)
+                } else if let Some(new_root) = node_for_removal.right.take() {
+                    new_root.borrow_mut().parent = Weak::new();
+                    Node::leftmost(&new_root).borrow_mut().left = node_for_removal.left.take();
+                    Some(new_root)
+                } else {
+                    None
+                };
+            }
+        }
+
+        self.length -= 1;
+        Ok(())
     }
 
     fn __getitem__(&self, index: usize) -> PyResult<Py<PyAny>> {
-        self.into_iter().nth(index).ok_or_else(|| PyIndexError::new_err(
+        PyIter(self.into_iter()).nth(index).ok_or_else(|| PyIndexError::new_err(
             format!("Index: {index} out of range!")
         ))
     }
 
-    fn __str__(&self, py: Python<'_>) -> PyResult<String> {
-        let mut string = String::with_capacity(2);
-        string.push('[');
+    // fn __str__(&self, py: Python<'_>) -> PyResult<String> {
+    //     let mut string = String::with_capacity(2);
+    //     string.push('[');
 
-        let mut length_remaining = self.length;
-        let mut iter = self.into_iter();
-        while let Some(item) = iter.next() {
-            length_remaining -= 1;
-            string.push_str(item.as_ref(py).str()?.to_str()?);
-            if length_remaining != 0 { // Not the last item
-                string.push_str(", ")
-            }
-        }
+    //     let mut length_remaining = self.length;
+    //     let mut iter = self.into_iter();
+    //     while let Some(item) = iter.next() {
+    //         length_remaining -= 1;
+    //         string.push_str(item.as_ref(py).str()?.to_str()?);
+    //         if length_remaining != 0 { // Not the last item
+    //             string.push_str(", ")
+    //         }
+    //     }
 
-        string.push(']');
-        Ok(string)
-    }
+    //     string.push(']');
+    //     Ok(string)
+    // }
 }
 
 impl IntoIterator for &PriorityQueue {
-    type Item = Py<PyAny>;
+    type Item = WNode;
     type IntoIter = IntoIter;
 
     fn into_iter(self) -> Self::IntoIter {
@@ -185,39 +269,24 @@ impl IntoIterator for &PriorityQueue {
     }
 }
 
-#[pyclass(unsendable)]
 struct IntoIter {
     stack: Vec<Rc<RefCell<Node>>>,
 }
 
 impl Iterator for IntoIter {
-    type Item = Py<PyAny>;
+    type Item = WNode;
 
-    fn next(&mut self) -> Option<Py<PyAny>> {
+    fn next(&mut self) -> Option<Self::Item> {
         self.stack.pop().map(|node| {
-            let node = (*node).borrow();
-
-            let mut next = node.left.clone();
+            let mut next = node.borrow().left.clone();
             while let Some(node) = next {
-                next = (*node).borrow().right.clone(); // Will be pushed on in next iteration
+                next = node.borrow().right.clone(); // Will be pushed on in next iteration
                 self.stack.push(node);
             }
             
-            // Should always be the greatest
-            Py::clone(&node.item)
+            // Should always be the current greatest node
+            node
         })
-    }
-}
-impl std::iter::FusedIterator for IntoIter {}
-
-#[pymethods]
-impl IntoIter {
-    fn __next__(&mut self) -> Option<<Self as Iterator>::Item> {
-        self.next()
-    }
-
-    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
-        slf
     }
 }
 
@@ -229,6 +298,45 @@ impl PriorityQueue {
             Some(get_comparison_value) => get_comparison_value.call1(py, (item,))?,
             None => item.into_py(py),
         })
+    }
+
+    // Gets the greatest node in the tree without allocating.
+    fn greatest_node(&self) -> Option<Rc<RefCell<Node>>> {
+        self.root.as_ref().map(|root_node| Node::rightmost(root_node))
+    }
+
+    // Gets the least node in the tree without allocating.
+    fn least_node(&self) -> Option<Rc<RefCell<Node>>> {
+        self.root.as_ref().map(|root_node| Node::leftmost(root_node))
+    }
+}
+
+impl IntoIter {
+    fn into_py(self) -> PyIter {
+        PyIter(self)
+    }
+}
+
+/// IntoIter but it returns `Py<PyAny>` instead of `WNode`
+#[pyclass(unsendable)]
+struct PyIter(IntoIter);
+
+impl Iterator for PyIter {
+    type Item = Py<PyAny>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next().map(|node| Py::clone(&node.borrow().item))
+    }
+}
+
+#[pymethods]
+impl PyIter {
+    fn __next__(&mut self) -> Option<<Self as Iterator>::Item> {
+        self.next()
+    }
+
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
     }
 }
 
