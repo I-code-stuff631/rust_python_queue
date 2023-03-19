@@ -3,7 +3,7 @@ use pyo3::{prelude::*, types::PyFunction};
 use pyo3::exceptions::PyIndexError;
 #[allow(unused_imports)]
 use std::cmp::Ordering::*;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::cell::RefCell;
 
 
@@ -12,6 +12,7 @@ struct Node {
     item: Py<PyAny>,
     /// This should be used for any comparisions
     value: Py<PyAny>,
+    parent: Weak<RefCell<Node>>,
     left: Option<Rc<RefCell<Node>>>,
     right: Option<Rc<RefCell<Node>>>,
 }
@@ -41,39 +42,41 @@ impl PriorityQueue {
     /// It is a logical error to modify the item in such a way that its comparison value
     /// would change after it has been pushed.
     fn push(&mut self, py: Python<'_>, item: &PyAny) -> PyResult<()>{
-        let new_node = Node {
+        let mut new_node = Node {
             item: item.into_py(py),
             value: self.get_comparison_value_for(item)?,
+            parent: Weak::new(),
             left: None,
             right: None,
         };
 
         match &self.root {
             Some(root_node) => {
-                let mut next = Rc::as_ptr(root_node);
+                let mut next: *const Rc<RefCell<Node>> = root_node as *const _;
                 loop {
                     let mut node = unsafe {
-                        // SAFETY: We never decrease any Rcs strong counts to zero (or at all)
+                        // SAFETY: We do not decrease the strong count of any Rcs in the tree...
                         (*next).borrow_mut()
                     };
                     next = match new_node.value.as_ref(py).compare(&node.value)? {
                         Less => match &node.left {
-                            Some(left_node) => Rc::as_ptr(left_node),
+                            Some(left_node) => left_node,
                             None => {
+                                new_node.parent = unsafe { Rc::downgrade(&*next) };
                                 node.left = Some(Rc::new(RefCell::new(new_node)));
                                 break;
                             },
                         }
                         Equal | Greater => match &node.right {
-                            Some(right_node) => Rc::as_ptr(right_node),
+                            Some(right_node) => right_node,
                             None => {
+                                new_node.parent = unsafe { Rc::downgrade(&*next) };
                                 node.right = Some(Rc::new(RefCell::new(new_node)));
                                 break;
                             },
                         }
                     }
                 };
-
             },
             None => self.root = Some(Rc::new(RefCell::new(new_node))),
         }
