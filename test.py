@@ -1,4 +1,4 @@
-from python_extension import PriorityQueue
+from rust_queue import PriorityQueue
 import unittest  # Hacker rank
 
 

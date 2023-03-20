@@ -385,7 +385,7 @@ impl PyIter {
 
 /// A Python module implemented in Rust.
 #[pymodule]
-fn python_extension(_py: Python, m: &PyModule) -> PyResult<()> {
+fn rust_queue(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<PriorityQueue>()?;
     Ok(())
 }
