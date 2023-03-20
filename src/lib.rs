@@ -21,28 +21,45 @@ impl Node {
     /// Returns the leftmost node from the passed node
     fn leftmost(node: &WNode) -> WNode {
         let mut next: *const Rc<RefCell<Node>> = node;
-        unsafe {
-            // SAFETY: The Rc to which next points is not dropped
-            while let Some(left_node) = &(*next).borrow().left {
-                next = left_node;
+        while let Some(left_node) = unsafe {
+            // SAFETY: The Rc to which next points has not been dropped
+            let node_ptr: *const Node = (*next).as_ptr(); // Saves dynamic borrow check
+            match &(*node_ptr).left {
+                Some(ptr) => {
+                    // I cast here because the pointer is not guaranteed to be valid (ie. it could be invalidated via
+                    // '(*left_node).borrow().parent.upgrade().unwrap().borrow_mut().left = None')
+                    Some(ptr as *const WNode)
+                },
+                None => None,
             }
-            Rc::clone(&*next)
+        } {
+            next = left_node;
         }
+        return unsafe { Rc::clone(&*next) }
     }
 
     /// Returns the rightmost node from the passed node
     fn rightmost(node: &WNode) -> WNode {
         let mut next: *const Rc<RefCell<Node>> = node;
-        unsafe {
-            // SAFETY: The Rc to which next points is not dropped
-            while let Some(right_node) = &(*next).borrow().right {
-                next = right_node;
+        while let Some(right_node) = unsafe {
+            // SAFETY: The Rc to which next points has not been dropped
+            let node_ptr: *const Node = (*next).as_ptr(); // Saves dynamic borrow check
+            match &(*node_ptr).right {
+                Some(ptr) => {
+                    // I cast here because the pointer is not guaranteed to be valid (ie. it could be invalidated via
+                    // '(*right_node).borrow().parent.upgrade().unwrap().borrow_mut().right = None')
+                    Some(ptr as *const WNode)
+                },
+                None => None,
             }
-            Rc::clone(&*next)
+        } {
+            next = right_node;
         }
+        return unsafe { Rc::clone(&*next) }
     }
 }
 
+/// Wrapped node
 type WNode = Rc<RefCell<Node>>;
 
 /// PriorityQueue implmented with an explicit binary search tree
@@ -95,7 +112,7 @@ impl PriorityQueue {
                             Some(left_node) => left_node,
                             None => {
                                 new_node.parent = unsafe { Rc::downgrade(&*next) };
-                                node.left = Some(Rc::new(RefCell::new(new_node)));
+                                node.left = Some(wrap_node(new_node));
                                 break;
                             },
                         }
@@ -103,14 +120,14 @@ impl PriorityQueue {
                             Some(right_node) => right_node,
                             None => {
                                 new_node.parent = unsafe { Rc::downgrade(&*next) };
-                                node.right = Some(Rc::new(RefCell::new(new_node)));
+                                node.right = Some(wrap_node(new_node));
                                 break;
                             },
                         }
                     }
                 };
             },
-            None => self.root = Some(Rc::new(RefCell::new(new_node))),
+            None => self.root = Some(wrap_node(new_node)),
         }
 
         self.length += 1;
@@ -269,7 +286,7 @@ impl PriorityQueue {
         string.push('[');
 
         let mut length_remaining = self.length;
-        let mut iter = self.into_iter().into_py_any();
+        let mut iter = self.into_iter().yield_py_any();
         while let Some(item) = iter.next() {
             length_remaining -= 1;
             string.push_str(item.as_ref(py).str()?.to_str()?);
@@ -354,8 +371,8 @@ impl PriorityQueue {
 }
 
 impl IntoIter {
-    /// Return `Py<PyAny>` instead of `WNode`
-    fn into_py_any(self) -> PyIter {
+    /// Causes the iterator to yield `Py<PyAny>` instead of `WNode`
+    fn yield_py_any(self) -> PyIter {
         PyIter(self)
     }
 }
