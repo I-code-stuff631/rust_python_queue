@@ -111,10 +111,31 @@ impl PriorityQueue {
         Ok(())
     }
 
-    // /// Pops the next item off the queue, will return None if the queue is empty.
-    // fn pop(&mut self, index: usize) -> Option<Py<PyAny>> {
-    //     self.
-    // }
+    /// Pops the next item off the queue, will return None if the queue is empty.
+    fn pop(&mut self) -> Option<Py<PyAny>> {
+        self.greatest_node().map(|greatest_node| {
+            let mut greatest_node = greatest_node.borrow_mut();
+            match greatest_node.parent.upgrade() {
+                Some(parent) => {
+                    parent.borrow_mut().right = greatest_node.left.take().map(|left_node| {
+                        left_node.borrow_mut().parent = Rc::downgrade(&parent); // Update parent node
+                        left_node
+                    });
+                }
+                None => {
+                    // The greatest node is the root node
+                    self.root = greatest_node.left.take().map(|new_root| {
+                        new_root.borrow_mut().parent = Weak::new(); // It is the root node so it has no parent
+                        new_root
+                    });
+                }
+            }
+
+            self.length -= 1;
+            // Now that greatest node is out of the queue
+            Py::clone(&greatest_node.item)
+        })
+    }
 
     /// Access the next item without removing it from the queue, this method will return None if the queue 
     /// is empty.
@@ -142,7 +163,7 @@ impl PriorityQueue {
     fn clear(&mut self) { 
         self.root = None;
         self.length = 0;
-     }
+    }
 
     fn is_empty(&self) -> bool {
         self.root.is_none()
@@ -156,11 +177,11 @@ impl PriorityQueue {
         PyIter(self.into_iter())
     }
 
-    fn __delitem__(&mut self, py: Python<'_>, index: usize) -> PyResult<()> {
+    fn __delitem__(&mut self, index: usize) -> PyResult<()> {
         let node_for_removal = if index == 0 {
             self.greatest_node() // Saves an allocation
-        } else if index == self.length.saturating_sub(1) /*<< End of queue*/ { 
-            self.least_node() // Also saves an allocation
+        } else if index == self.length.saturating_sub(1) {
+            self.least_node() // Saves an allocation and the time it would take to iterate to the last item
         } else {
             self.into_iter().nth(index)
         }.ok_or_else(|| PyIndexError::new_err(format!("Index: {index} out of range!")))?;
@@ -227,28 +248,35 @@ impl PriorityQueue {
     }
 
     fn __getitem__(&self, index: usize) -> PyResult<Py<PyAny>> {
-        PyIter(self.into_iter()).nth(index).ok_or_else(|| PyIndexError::new_err(
-            format!("Index: {index} out of range!")
-        ))
+        if index == 0 {
+            self.greatest_node() // Saves an allocation
+        } else if index == self.length.saturating_sub(1) {
+            self.least_node() // Saves an allocation and the time it would take to iterate to the last item
+        } else {
+            self.into_iter().nth(index)
+        }.map(|node| Py::clone(&node.borrow().item))
+        .ok_or_else(|| PyIndexError::new_err(format!("Index: {index} out of range!")))
     }
 
-    // fn __str__(&self, py: Python<'_>) -> PyResult<String> {
-    //     let mut string = String::with_capacity(2);
-    //     string.push('[');
+    // fn __setitem__(&self, index: usize) -> PyResult<Py<PyAny>>;
 
-    //     let mut length_remaining = self.length;
-    //     let mut iter = self.into_iter();
-    //     while let Some(item) = iter.next() {
-    //         length_remaining -= 1;
-    //         string.push_str(item.as_ref(py).str()?.to_str()?);
-    //         if length_remaining != 0 { // Not the last item
-    //             string.push_str(", ")
-    //         }
-    //     }
+    fn __str__(&self, py: Python<'_>) -> PyResult<String> {
+        let mut string = String::with_capacity(2);
+        string.push('[');
 
-    //     string.push(']');
-    //     Ok(string)
-    // }
+        let mut length_remaining = self.length;
+        let mut iter = self.into_iter().into_py_iter();
+        while let Some(item) = iter.next() {
+            length_remaining -= 1;
+            string.push_str(item.as_ref(py).str()?.to_str()?);
+            if length_remaining != 0 { // Not the last item
+                string.push_str(", ")
+            }
+        }
+
+        string.push(']');
+        Ok(string)
+    }
 }
 
 impl IntoIterator for &PriorityQueue {
@@ -312,7 +340,7 @@ impl PriorityQueue {
 }
 
 impl IntoIter {
-    fn into_py(self) -> PyIter {
+    fn into_py_iter(self) -> PyIter {
         PyIter(self)
     }
 }
