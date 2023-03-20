@@ -22,6 +22,7 @@ impl Node {
     fn leftmost(node: &WNode) -> WNode {
         let mut next: *const Rc<RefCell<Node>> = node;
         unsafe {
+            // SAFETY: The Rc to which next points is not dropped
             while let Some(left_node) = &(*next).borrow().left {
                 next = left_node;
             }
@@ -33,6 +34,7 @@ impl Node {
     fn rightmost(node: &WNode) -> WNode {
         let mut next: *const Rc<RefCell<Node>> = node;
         unsafe {
+            // SAFETY: The Rc to which next points is not dropped
             while let Some(right_node) = &(*next).borrow().right {
                 next = right_node;
             }
@@ -75,13 +77,17 @@ impl PriorityQueue {
             left: None,
             right: None,
         };
+        #[inline]
+        fn wrap_node(node: Node) -> WNode {
+            Rc::new(RefCell::new(node))
+        }
 
         match &self.root {
             Some(root_node) => {
                 let mut next: *const Rc<RefCell<Node>> = root_node;
                 loop {
                     let mut node = unsafe {
-                        // SAFETY: We do not decrease the strong count of any Rcs in the tree...
+                        // SAFETY: The Rc to which next points is not dropped
                         (*next).borrow_mut()
                     };
                     next = match new_node.value.as_ref(py).compare(&node.value)? {
@@ -150,8 +156,6 @@ impl PriorityQueue {
 
     //     match &self.root {
     //         Some(root_node) => {
-
-                
     //         },
     //         None => Ok(false),
     //     }
@@ -265,7 +269,7 @@ impl PriorityQueue {
         string.push('[');
 
         let mut length_remaining = self.length;
-        let mut iter = self.into_iter().into_py_iter();
+        let mut iter = self.into_iter().into_py_any();
         while let Some(item) = iter.next() {
             length_remaining -= 1;
             string.push_str(item.as_ref(py).str()?.to_str()?);
@@ -298,6 +302,16 @@ impl IntoIterator for &PriorityQueue {
 }
 
 struct IntoIter {
+    // If the iter uses strong refs the user does not know which nodes, when .pop'ed, will still be yielded by
+    // the iter and which ones will not.
+    // If when the nodes are pop'ed their left IS .taken then the user does not know which nodes, when .pop'ed,
+    // will both still be yielded by the iter and cause other nodes to be skipped.
+
+    // If the queue uses weak refs and just skips past any that can not be upgraded then the user does not know
+    // which nodes, when popped, will cause the iter to skip sections.
+    // If the queue uses weak refs and stops iteration as soon as it fails to upgrade one, then the user does not
+    // know which nodes, when popped and reached in iteration, cause the iteration to stop early and which ones
+    // will not cause that.
     stack: Vec<Rc<RefCell<Node>>>,
 }
 
@@ -340,7 +354,8 @@ impl PriorityQueue {
 }
 
 impl IntoIter {
-    fn into_py_iter(self) -> PyIter {
+    /// Return `Py<PyAny>` instead of `WNode`
+    fn into_py_any(self) -> PyIter {
         PyIter(self)
     }
 }
