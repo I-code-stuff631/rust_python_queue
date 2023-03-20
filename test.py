@@ -80,17 +80,23 @@ class Test(unittest.TestCase):
         self.assertRaises(StopIteration, queue_iter.__next__)
 
     def test_indexing(self):
-        self.queue.push(7)
-        self.queue.push(9)
-        self.queue.push(4)
         self.queue.push(5)
-        self.queue.push(4)
-        self.assertEqual(9, self.queue[0])
-        self.assertEqual(7, self.queue[1])
+        self.queue.push(0)
+        self.queue.push(3)
+        self.queue.push(2)
+        self.queue.push(10)
+        self.queue.push(5)
+        self.queue.push(6)
+        # 10, 6, 5, 5, 3, 2, 0
+
+        self.assertEqual(10, self.queue[0])
+        self.assertEqual(6, self.queue[1])
         self.assertEqual(5, self.queue[2])
-        self.assertEqual(4, self.queue[3])
-        self.assertEqual(4, self.queue[4])
-        self.assertRaises(IndexError, lambda: self.queue[5])
+        self.assertEqual(5, self.queue[3])
+        self.assertEqual(3, self.queue[4])
+        self.assertEqual(2, self.queue[5])
+        self.assertEqual(0, self.queue[6])
+        self.assertRaises(IndexError, lambda: self.queue[7])
 
     def test_contains(self):
         self.queue.push(1)
@@ -114,26 +120,22 @@ class Test(unittest.TestCase):
     #     self.assertEqual("[10, 5, 5, 3, 1]", str(self.queue))
 
     def test_length_tracking(self):
-        self.queue.push(5)
-        self.queue.push(10)
-        self.queue.push(5)
-        self.queue.push(1)
-        self.queue.push(3)
+        for _ in range(5):
+            self.queue.push(None)
         self.assertEqual(5, len(self.queue))
 
         # Peek does not modify length
         self.queue.peek()
         self.assertEqual(5, len(self.queue))
 
-        del self.queue[0]
+        self.queue.pop()
         self.assertEqual(4, len(self.queue))
-        # self.queue.pop()
-        # self.queue.pop()
+        # del self.queue[0]  # Unimpled
         # self.assertEqual(3, len(self.queue))
-        # self.queue.clear()
-        # self.assertEqual(0, len(self.queue))
-        # self.queue.pop()
-        # self.assertEqual(0, len(self.queue))
+        self.queue.clear()
+        self.assertEqual(0, len(self.queue))
+        self.queue.pop()
+        self.assertEqual(0, len(self.queue))
 
     def setUp(self) -> None:
         self.queue = PriorityQueue()
