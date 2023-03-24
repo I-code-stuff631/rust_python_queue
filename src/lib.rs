@@ -5,6 +5,7 @@ use pyo3::exceptions::PyIndexError;
 use std::cmp::Ordering::*;
 use std::rc::{Rc, Weak};
 use std::cell::RefCell;
+use std::iter::FusedIterator;
 
 
 struct Node {
@@ -24,14 +25,10 @@ impl Node {
         while let Some(left_node) = unsafe {
             // SAFETY: The Rc to which next points has not been dropped
             let node_ptr: *const Node = (*next).as_ptr(); // Saves dynamic borrow check
-            match &(*node_ptr).left {
-                Some(ptr) => {
-                    // I cast here because the pointer is not guaranteed to be valid (ie. it could be invalidated via
-                    // '(*left_node).borrow().parent.upgrade().unwrap().borrow_mut().left = None')
-                    Some(ptr as *const WNode)
-                },
-                None => None,
-            }
+            // SAFETY: If there are refs to this node stored somewhere the immutability guarantee
+            // is still upheld since we dont mutate it
+            (*node_ptr).left.as_ptr() // I use as_ptr here because the pointer is not guaranteed to be valid
+            // (ie. it could be invalidated via '(*left_node).borrow().parent.upgrade().unwrap().borrow_mut().left = None')
         } {
             next = left_node;
         }
@@ -44,14 +41,10 @@ impl Node {
         while let Some(right_node) = unsafe {
             // SAFETY: The Rc to which next points has not been dropped
             let node_ptr: *const Node = (*next).as_ptr(); // Saves dynamic borrow check
-            match &(*node_ptr).right {
-                Some(ptr) => {
-                    // I cast here because the pointer is not guaranteed to be valid (ie. it could be invalidated via
-                    // '(*right_node).borrow().parent.upgrade().unwrap().borrow_mut().right = None')
-                    Some(ptr as *const WNode)
-                },
-                None => None,
-            }
+            // SAFETY: If there are refs to this node stored somewhere the immutability guarantee
+            // is still upheld since we dont mutate it
+            (*node_ptr).right.as_ptr() // I use as_ptr here because the pointer is not guaranteed to be valid (ie. it
+            // could be invalidated via '(*right_node).borrow().parent.upgrade().unwrap().borrow_mut().right = None')
         } {
             next = right_node;
         }
@@ -104,7 +97,7 @@ impl PriorityQueue {
                 let mut next: *const Rc<RefCell<Node>> = root_node;
                 loop {
                     let mut node = unsafe {
-                        // SAFETY: The Rc to which next points is not dropped
+                        // SAFETY: The Rc to which next points has not been dropped
                         (*next).borrow_mut()
                     };
                     next = match new_node.value.as_ref(py).compare(&node.value)? {
@@ -168,15 +161,16 @@ impl PriorityQueue {
         self.greatest_node().map(|node| Py::clone(&node.borrow().item))
     }
 
-    // fn __contains__(&self, py: Python<'_>, item: &PyAny) -> PyResult<bool> {
-    //     let value = self.get_comparison_value_for(item)?;
+    fn __contains__(&self, py: Python<'_>, item: &PyAny) -> PyResult<bool> {
+        let value = self.get_comparison_value_for(item)?;
 
-    //     match &self.root {
-    //         Some(root_node) => {
-    //         },
-    //         None => Ok(false),
-    //     }
-    // }
+        match &self.root {
+            Some(root_node) => {
+                todo!();
+            },
+            None => Ok(false),
+        }
+    }
 
     // /// Ez impl by calling __delitem__ when it is impled
     // fn remove(&mut self) { todo!() }
@@ -310,8 +304,8 @@ impl IntoIterator for &PriorityQueue {
 
         let mut next = self.root.clone();
         while let Some(node) = next {
-            next = (*node).borrow().right.clone(); // Will be pushed on in next iteration
-            stack.push(node);
+            stack.push(Rc::downgrade(&node));
+            next = node.borrow().right.clone();
         }
 
         IntoIter { stack }
@@ -324,30 +318,43 @@ struct IntoIter {
     // If when the nodes are pop'ed their left IS .taken then the user does not know which nodes, when .pop'ed,
     // will both still be yielded by the iter and cause other nodes to be skipped.
 
+    // # Weak refs should prob be used anyways
     // If the queue uses weak refs and just skips past any that can not be upgraded then the user does not know
     // which nodes, when popped, will cause the iter to skip sections.
     // If the queue uses weak refs and stops iteration as soon as it fails to upgrade one, then the user does not
     // know which nodes, when popped and reached in iteration, cause the iteration to stop early and which ones
-    // will not cause that.
-    stack: Vec<Rc<RefCell<Node>>>,
+    // will not cause that. (this method preserves the users expectation about the order of iteration stopping when
+    // that expectation would be violated)
+    stack: Vec<Weak<RefCell<Node>>>,
 }
 
 impl Iterator for IntoIter {
     type Item = WNode;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.stack.pop().map(|node| {
-            let mut next = node.borrow().left.clone();
-            while let Some(node) = next {
-                next = node.borrow().right.clone(); // Will be pushed on in next iteration
-                self.stack.push(node);
+        self.stack.pop().and_then(|weakref| {
+            match weakref.upgrade() {
+                Some(node) => {
+                    let mut next = node.borrow().left.clone();
+                    while let Some(node) = next {
+                        self.stack.push(Rc::downgrade(&node));
+                        next = node.borrow().right.clone();
+                    }
+
+                    // Should be the current greatest node
+                    Some(node)
+                }
+                None => {
+                    // Stop iteration early
+                    self.stack.clear();
+                    self.stack.shrink_to_fit();
+                    None
+                }
             }
-            
-            // Should always be the current greatest node
-            node
         })
     }
 }
+impl FusedIterator for IntoIter {}
 
 /// Rust only
 impl PriorityQueue {
@@ -388,6 +395,7 @@ impl Iterator for PyIter {
         self.0.next().map(|node| Py::clone(&node.borrow().item))
     }
 }
+impl FusedIterator for PyIter {}
 
 #[pymethods]
 impl PyIter {
@@ -405,4 +413,23 @@ impl PyIter {
 fn rust_queue(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<PriorityQueue>()?;
     Ok(())
+}
+
+trait AsPtr {
+    type Ret;
+
+    fn as_ptr(&self) -> Self::Ret;
+}
+
+impl<T> AsPtr for Option<T> {
+    type Ret = Option<*const T>;
+
+    /// Converts from `&Option<T>` to `Option<*const T>`.
+    #[inline]
+    fn as_ptr(&self) -> Option<*const T> {
+        match *self {
+            Some(ref ptr) => Some(ptr), // Coerced to *const T
+            None => None,
+        }
+    }
 }
