@@ -130,26 +130,27 @@ impl PriorityQueue {
     /// Pops the next item off the queue, will return None if the queue is empty.
     fn pop(&mut self) -> Option<Py<PyAny>> {
         self.greatest_node().map(|greatest_node| {
-            let mut greatest_node = greatest_node.borrow_mut();
-            match greatest_node.parent.upgrade() {
-                Some(parent) => {
-                    parent.borrow_mut().right = greatest_node.left.take().map(|left_node| {
-                        left_node.borrow_mut().parent = Rc::downgrade(&parent); // Update parent node
-                        left_node
-                    });
+            { // Remove the node from the tree
+                let mut greatest_node = greatest_node.borrow_mut();
+                match greatest_node.parent.upgrade() {
+                    Some(parent) => {
+                        parent.borrow_mut().right = greatest_node.left.take().map(|left_node| {
+                            left_node.borrow_mut().parent = Rc::downgrade(&parent); // Update parent node
+                            left_node
+                        });
+                    }
+                    None => {
+                        // The greatest node is the root node
+                        self.root = greatest_node.left.take().map(|new_root| {
+                            new_root.borrow_mut().parent = Weak::new();
+                            new_root
+                        });
+                    }
                 }
-                None => {
-                    // The greatest node is the root node
-                    self.root = greatest_node.left.take().map(|new_root| {
-                        new_root.borrow_mut().parent = Weak::new(); // It is the root node so it has no parent
-                        new_root
-                    });
-                }
-            }
+            };
 
             self.length -= 1;
-            // Now that greatest node is out of the queue
-            Py::clone(&greatest_node.item)
+            Rc::try_unwrap(greatest_node).ok().expect("The node should no longer be in the tree").into_inner().item
         })
     }
 
@@ -161,16 +162,20 @@ impl PriorityQueue {
         self.greatest_node().map(|node| Py::clone(&node.borrow().item))
     }
 
-    fn __contains__(&self, py: Python<'_>, item: &PyAny) -> PyResult<bool> {
-        let value = self.get_comparison_value_for(item)?;
+    // fn __contains__(&self, py: Python<'_>, item: &PyAny) -> PyResult<bool> {
+    //     let value = self.get_comparison_value_for(item)?;
 
-        match &self.root {
-            Some(root_node) => {
-                todo!();
-            },
-            None => Ok(false),
-        }
-    }
+    //     let mut next = self.root.as_ptr();
+    //     if let Some(node) = next {
+
+    //     }
+    //     // match &self.root {
+    //     //     Some(root_node) => {
+    //     //         todo!();
+    //     //     },
+    //     //     None => Ok(false),
+    //     // }
+    // }
 
     // /// Ez impl by calling __delitem__ when it is impled
     // fn remove(&mut self) { todo!() }
@@ -193,13 +198,7 @@ impl PriorityQueue {
     }
 
     fn __delitem__(&mut self, index: usize) -> PyResult<()> {
-        let node_for_removal = if index == 0 {
-            self.greatest_node() // Saves an allocation
-        } else if index == self.length.saturating_sub(1) {
-            self.least_node() // Saves an allocation and the time it would take to iterate to the last item
-        } else {
-            self.into_iter().nth(index)
-        }.ok_or_else(|| PyIndexError::new_err(format!("Index: {index} out of range!")))?;
+        let node_for_removal = self.node_at(index)?;
         // This is effectively a Ref because it is not declared as mut
         let node_for_removal_ref = node_for_removal.borrow_mut();
 
@@ -239,7 +238,7 @@ impl PriorityQueue {
                 } else { // It should be on the left
                     debug_assert!(parent_node.left.is_some());
                     parent_node.left = replacement;
-                }              
+                }
             }
             None => { // The node for removal is the root node
                 let mut node_for_removal = node_for_removal_ref;
@@ -258,19 +257,13 @@ impl PriorityQueue {
             }
         }
 
+        debug_assert_eq!(1, Rc::strong_count(&node_for_removal)); // node has been removed from the tree
         self.length -= 1;
         Ok(())
     }
 
     fn __getitem__(&self, index: usize) -> PyResult<Py<PyAny>> {
-        if index == 0 {
-            self.greatest_node() // Saves an allocation
-        } else if index == self.length.saturating_sub(1) {
-            self.least_node() // Saves an allocation and the time it would take to iterate to the last item
-        } else {
-            self.into_iter().nth(index)
-        }.map(|node| Py::clone(&node.borrow().item))
-        .ok_or_else(|| PyIndexError::new_err(format!("Index: {index} out of range!")))
+        self.node_at(index).map(|node| Py::clone(&node.borrow().item))
     }
 
     // fn __setitem__(&self, index: usize) -> PyResult<Py<PyAny>>;
@@ -375,6 +368,17 @@ impl PriorityQueue {
     fn least_node(&self) -> Option<Rc<RefCell<Node>>> {
         self.root.as_ref().map(|root_node| Node::leftmost(root_node))
     }
+
+    /// Gets the node at the specified index
+    fn node_at(&self, index: usize) -> PyResult<WNode> {
+        if index == 0 {
+            self.greatest_node() // Saves an allocation
+        } else if index == self.length.saturating_sub(1) {
+            self.least_node() // Saves an allocation and the time it would take to iterate to the last item
+        } else {
+            self.into_iter().nth(index)
+        }.ok_or_else(|| PyIndexError::new_err(format!("Index: {index} out of range!")))
+    }
 }
 
 impl IntoIter {
@@ -416,13 +420,13 @@ fn rust_queue(_py: Python, m: &PyModule) -> PyResult<()> {
 }
 
 trait AsPtr {
-    type Ret;
+    type Type;
 
-    fn as_ptr(&self) -> Self::Ret;
+    fn as_ptr(&self) -> Self::Type;
 }
 
 impl<T> AsPtr for Option<T> {
-    type Ret = Option<*const T>;
+    type Type = Option<*const T>;
 
     /// Converts from `&Option<T>` to `Option<*const T>`.
     #[inline]
