@@ -23,7 +23,7 @@ impl Node {
     fn leftmost(node: &WNode) -> WNode {
         let mut next: *const Rc<RefCell<Node>> = node;
         while let Some(left_node) = unsafe {
-            // SAFETY: The Rc to which next points has not been dropped
+            // SAFETY: next points to an Rc whos contents have not been dropped
             let node_ptr: *const Node = (*next).as_ptr(); // Saves dynamic borrow check
             // SAFETY: If there are refs to this node stored somewhere the immutability guarantee
             // is still upheld since we dont mutate it
@@ -32,14 +32,17 @@ impl Node {
         } {
             next = left_node;
         }
-        return unsafe { Rc::clone(&*next) }
+        unsafe {
+            // SAFETY: next points to an Rc whos contents have not been dropped
+            Rc::clone(&*next)
+        }
     }
 
     /// Returns the rightmost node from the passed node
     fn rightmost(node: &WNode) -> WNode {
         let mut next: *const Rc<RefCell<Node>> = node;
         while let Some(right_node) = unsafe {
-            // SAFETY: The Rc to which next points has not been dropped
+            // SAFETY: next points to an Rc whos contents have not been dropped
             let node_ptr: *const Node = (*next).as_ptr(); // Saves dynamic borrow check
             // SAFETY: If there are refs to this node stored somewhere the immutability guarantee
             // is still upheld since we dont mutate it
@@ -48,7 +51,10 @@ impl Node {
         } {
             next = right_node;
         }
-        return unsafe { Rc::clone(&*next) }
+        unsafe {
+            // SAFETY: next points to an Rc whos contents have not been dropped
+            Rc::clone(&*next)
+        }
     }
 }
 
@@ -289,7 +295,7 @@ impl PriorityQueue {
 
 impl IntoIterator for &PriorityQueue {
     type Item = WNode;
-    type IntoIter = IntoIter;
+    type IntoIter = Iter;
 
     fn into_iter(self) -> Self::IntoIter {
         // If the tree was height-balanced this capacity could be smaller
@@ -301,27 +307,22 @@ impl IntoIterator for &PriorityQueue {
             next = node.borrow().right.clone();
         }
 
-        IntoIter { stack }
+        Iter { stack }
     }
 }
 
-struct IntoIter {
-    // If the iter uses strong refs the user does not know which nodes, when .pop'ed, will still be yielded by
-    // the iter and which ones will not.
-    // If when the nodes are pop'ed their left IS .taken then the user does not know which nodes, when .pop'ed,
-    // will both still be yielded by the iter and cause other nodes to be skipped.
-
+struct Iter {
     // # Weak refs should prob be used anyways
     // If the queue uses weak refs and just skips past any that can not be upgraded then the user does not know
     // which nodes, when popped, will cause the iter to skip sections.
     // If the queue uses weak refs and stops iteration as soon as it fails to upgrade one, then the user does not
     // know which nodes, when popped and reached in iteration, cause the iteration to stop early and which ones
-    // will not cause that. (this method preserves the users expectation about the order of iteration stopping when
-    // that expectation would be violated)
+    // will not cause that. (This one should be easier to program and also should preserve the users expectation
+    // about the order of iteration by stopping when that expectation would be violated)
     stack: Vec<Weak<RefCell<Node>>>,
 }
 
-impl Iterator for IntoIter {
+impl Iterator for Iter {
     type Item = WNode;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -347,7 +348,7 @@ impl Iterator for IntoIter {
         })
     }
 }
-impl FusedIterator for IntoIter {}
+impl FusedIterator for Iter {}
 
 /// Rust only
 impl PriorityQueue {
@@ -381,16 +382,17 @@ impl PriorityQueue {
     }
 }
 
-impl IntoIter {
+impl Iter {
     /// Causes the iterator to yield `Py<PyAny>` instead of `WNode`
-    fn yield_py_any(self) -> PyIter {
+    fn yield_py_any(self) -> PyIter { // This SHOULD be always being inlined as idk how it would be able to not be
+        // (u might want to test that tho) #[repr(transparent)]?
         PyIter(self)
     }
 }
 
-/// IntoIter but it returns `Py<PyAny>` instead of `WNode`
+/// Iter but it returns `Py<PyAny>` instead of `WNode`
 #[pyclass(unsendable)]
-struct PyIter(IntoIter);
+struct PyIter(Iter);
 
 impl Iterator for PyIter {
     type Item = Py<PyAny>;
