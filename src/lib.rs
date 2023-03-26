@@ -61,16 +61,16 @@ impl Node {
 /// Wrapped node
 type WNode = Rc<RefCell<Node>>;
 
-/// PriorityQueue implmented with an explicit binary search tree
+/// Double ended priority queue implmented with an explicit binary search tree
 #[pyclass(sequence, unsendable)]
-struct PriorityQueue {
+struct DoublePriorityQueue {
     root: Option<WNode>,
     get_cmpison_value: Option<Py<PyFunction>>,
     length: usize,
 }
 
 #[pymethods]
-impl PriorityQueue {
+impl DoublePriorityQueue {
     /// comparison_value defines for each item the value that will be used for comparisions.
     /// If it is None then the item will be used as this comparision value.
     #[new]
@@ -133,8 +133,8 @@ impl PriorityQueue {
         Ok(())
     }
 
-    /// Pops the next item off the queue, will return None if the queue is empty.
-    fn pop(&mut self) -> Option<Py<PyAny>> {
+    /// Pops the next item with the greatest priority off the queue, will return None if the queue is empty.
+    fn pop_max(&mut self) -> Option<Py<PyAny>> {
         self.greatest_node().map(|greatest_node| {
             { // Remove the node from the tree
                 let mut greatest_node = greatest_node.borrow_mut();
@@ -160,21 +160,54 @@ impl PriorityQueue {
         })
     }
 
-    /// Access the next item without removing it from the queue, this method will return None if the queue 
-    /// is empty.
+    /// Pops the next item with the lowest priority off the queue, will return None if the queue is empty.
+    fn pop_min(&mut self) -> Option<Py<PyAny>> {
+        self.least_node().map(|least_node| {
+            { // Remove the node from the tree
+                let mut least_node = least_node.borrow_mut();
+                match least_node.parent.upgrade() {
+                    Some(parent) => {
+                        parent.borrow_mut().left = least_node.right.take().map(|right_node| {
+                            right_node.borrow_mut().parent = Rc::downgrade(&parent); // Update parent node
+                            right_node
+                        });
+                    }
+                    None => {
+                        // The greatest node is the root node
+                        self.root = least_node.right.take().map(|new_root| {
+                            new_root.borrow_mut().parent = Weak::new();
+                            new_root
+                        });
+                    }
+                }
+            };
+
+            self.length -= 1;
+            Rc::try_unwrap(least_node).ok().expect("The node should no longer be in the tree").into_inner().item
+        })
+    }
+
+    /// Access the next item with the greatest priority without removing it from the queue,
+    /// this method will return None if the queue is empty.
     /// It is a logical error to modify the item returned by this method in such a way that its
     /// comparison value would change.
-    fn peek(&self) -> Option<Py<PyAny>> {
+    fn peek_max(&self) -> Option<Py<PyAny>> {
         self.greatest_node().map(|node| Py::clone(&node.borrow().item))
+    }
+
+    /// Access the next item with the lowest priority without removing it from the queue,
+    /// this method will return None if the queue is empty.
+    /// It is a logical error to modify the item returned by this method in such a way that its
+    /// comparison value would change.
+    fn peek_min(&self) -> Option<Py<PyAny>> {
+        self.least_node().map(|node| Py::clone(&node.borrow().item))
     }
 
     // fn __contains__(&self, py: Python<'_>, item: &PyAny) -> PyResult<bool> {
     //     let value = self.get_comparison_value_for(item)?;
 
     //     let mut next = self.root.as_ptr();
-    //     if let Some(node) = next {
-
-    //     }
+    //     if let Some(node) = next {}
     //     // match &self.root {
     //     //     Some(root_node) => {
     //     //         todo!();
@@ -293,7 +326,7 @@ impl PriorityQueue {
     }
 }
 
-impl IntoIterator for &PriorityQueue {
+impl IntoIterator for &DoublePriorityQueue {
     type Item = WNode;
     type IntoIter = Iter;
 
@@ -351,7 +384,7 @@ impl Iterator for Iter {
 impl FusedIterator for Iter {}
 
 /// Rust only
-impl PriorityQueue {
+impl DoublePriorityQueue {
     fn get_comparison_value_for(&self, item: &PyAny) -> PyResult<Py<PyAny>> {
         let py = item.py();
         Ok(match &self.get_cmpison_value {
@@ -417,7 +450,7 @@ impl PyIter {
 /// A Python module implemented in Rust.
 #[pymodule]
 fn rust_queue(_py: Python, m: &PyModule) -> PyResult<()> {
-    m.add_class::<PriorityQueue>()?;
+    m.add_class::<DoublePriorityQueue>()?;
     Ok(())
 }
 
