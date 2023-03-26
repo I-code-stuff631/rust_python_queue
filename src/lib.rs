@@ -173,7 +173,7 @@ impl DoublePriorityQueue {
                         });
                     }
                     None => {
-                        // The greatest node is the root node
+                        // The least node is the root node
                         self.root = least_node.right.take().map(|new_root| {
                             new_root.borrow_mut().parent = Weak::new();
                             new_root
@@ -185,6 +185,12 @@ impl DoublePriorityQueue {
             self.length -= 1;
             Rc::try_unwrap(least_node).ok().expect("The node should no longer be in the tree").into_inner().item
         })
+    }
+
+    /// Pops off an item that satisfys the condition and is closest in value to the item specified.
+    /// Returns None if no such item exists.
+    fn pop_with_if_closest(&mut self, item: &PyAny, condition: &PyFunction) -> Option<Py<PyAny>> {
+        todo!();
     }
 
     /// Access the next item with the greatest priority without removing it from the queue,
@@ -393,12 +399,12 @@ impl DoublePriorityQueue {
         })
     }
 
-    // Gets the greatest node in the tree without allocating.
+    // Returns the rightmost node from the root.
     fn greatest_node(&self) -> Option<Rc<RefCell<Node>>> {
         self.root.as_ref().map(|root_node| Node::rightmost(root_node))
     }
 
-    // Gets the least node in the tree without allocating.
+    // Returns the leftmost node from the root.
     fn least_node(&self) -> Option<Rc<RefCell<Node>>> {
         self.root.as_ref().map(|root_node| Node::leftmost(root_node))
     }
