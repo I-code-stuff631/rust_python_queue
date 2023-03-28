@@ -1,4 +1,4 @@
-use pyo3::{prelude::*, types::{PyFunction, PyLong, PyFloat}};
+use pyo3::{prelude::*, types::{PyFunction, PyLong}};
 #[allow(unused_imports)]
 use pyo3::exceptions::PyIndexError;
 #[allow(unused_imports)]
@@ -191,8 +191,8 @@ impl DoublePriorityQueue {
     /// Returns None if no such item exists.
     fn pop_with_if_closest(&mut self,
         py: Python<'_>,
-        item: &PyAny,
-        condition: &PyFunction
+        item: &PyAny, // Item should be first
+        condition: &PyFunction,
     ) -> Result<Option<Py<PyAny>>, PyErr> {
         let mut filtered = Vec::with_capacity(self.length);
         for node in self.into_iter() {
@@ -205,27 +205,30 @@ impl DoublePriorityQueue {
         fn numeric_value_from(value: &PyAny) -> PyResult<f64> {
             let py = value.py();
             Ok(match value.downcast::<PyLong>() {
-                Ok(py_long) => py_long.extract::<i128>()? as f64,
-                Err(_) => value.extract::<f64>()?
+                Ok(int) => int.extract::<i128>()? as f64,
+                Err(_) => value.extract::<f64>()?,
             })
         }
         
         Ok(match filtered.next() {
             Some(node) => {
                 let item_value = numeric_value_from(self.get_comparison_value_for(item)?.as_ref(py))?;
-                let node_value = numeric_value_from(node.borrow().value.as_ref(py))?;
-                let difference = f64::abs(node_value - item_value);
+                let initial = {
+                    let node_value = numeric_value_from(node.borrow().value.as_ref(py))?;
+                    let difference = f64::abs(node_value - item_value);
+                    (node, difference)
+                };
 
-                let closest = filtered.try_fold((node, difference),
+                let closest = filtered.try_fold(initial,
                     |(closest, least_difference): (WNode, f64), node: WNode| -> PyResult<_> {
                         let node_value = numeric_value_from(node.borrow().value.as_ref(py))?;
                         let difference = f64::abs(node_value - item_value);
 
-                        if difference < least_difference {
-                            Ok((node, difference))
+                        Ok(if difference < least_difference {
+                            (node, difference)
                         } else {
-                            Ok((closest, least_difference))
-                        }
+                            (closest, least_difference)
+                        })
                     }
                 )?.0;
                 // Remove closest
@@ -288,15 +291,15 @@ impl DoublePriorityQueue {
     }
 
     fn __delitem__(&mut self, index: usize) -> PyResult<()> {
-        Ok(self.remove_node(&self.node_at(index)?))
+        let node = self.node_at(index)?;
+        self.remove_node(&node);
+        debug_assert_eq!(1, Rc::strong_count(&node)); // The node has been removed from the tree
+        self.length -= 1;
+        Ok(())
     }
 
     fn __getitem__(&self, index: usize) -> PyResult<Py<PyAny>> {
         self.node_at(index).map(|node| Py::clone(&node.borrow().item))
-    }
-
-    fn __setitem__(&self, index: usize, item: &PyAny) -> PyResult<()> {
-        todo!();
     }
 
     fn __str__(&self, py: Python<'_>) -> PyResult<String> {
@@ -406,25 +409,26 @@ impl DoublePriorityQueue {
         }.ok_or_else(|| PyIndexError::new_err(format!("Index: {index} out of range!")))
     }
 
-    /// Removes the passed node from the queue
-    fn remove_node(&mut self, node_for_removal: &WNode) {
+    /// Removes the passed node from the tree.
+    /// This function does not update the trees length, that is the responsibility of the caller.
+    fn remove_node(&mut self, node: &WNode) {
         // This is effectively a Ref because it is not declared as mut
-        let node_for_removal_ref = node_for_removal.borrow_mut();
+        let node_ref = node.borrow_mut();
 
-        match node_for_removal_ref.parent.upgrade() {
+        match node_ref.parent.upgrade() {
             Some(parent_node) => {
                 let replacement = {
-                    let mut node_for_removal = node_for_removal_ref;
-                    if let Some(left_node) = node_for_removal.left.take() {
-                        match node_for_removal.right.take() {
+                    let mut node = node_ref;
+                    if let Some(left_node) = node.left.take() {
+                        match node.right.take() {
                             Some(right_node) => {
                                 Node::leftmost(&right_node).borrow_mut().left = Some(left_node);
                                 Some(right_node)
                             },
                             None => Some(left_node),
                         }
-                    } else if let Some(right_node) = node_for_removal.right.take() {
-                        match node_for_removal.left.take() {
+                    } else if let Some(right_node) = node.right.take() {
+                        match node.left.take() {
                             Some(left_node) => {
                                 Node::leftmost(&right_node).borrow_mut().left = Some(left_node);
                                 Some(right_node)
@@ -435,10 +439,11 @@ impl DoublePriorityQueue {
                         None
                     }
                 };
-                // What side of its parent is node_for_removal on?
+
+                // What side of its parent is the node on?
                 let mut parent_node = parent_node.borrow_mut();
                 if let Some(right_node) = parent_node.right.clone() {
-                    if Rc::ptr_eq(&node_for_removal, &right_node) { // It is on the right
+                    if Rc::ptr_eq(&node, &right_node) { // It is on the right
                         parent_node.right = replacement;
                     } else { // It should be on the left
                         debug_assert!(parent_node.left.is_some());
@@ -449,25 +454,21 @@ impl DoublePriorityQueue {
                     parent_node.left = replacement;
                 }
             }
-            None => { // The node for removal is the root node
-                let mut node_for_removal = node_for_removal_ref;
-                // If node for removal has a left or right node then it will be the new root
-                self.root = if let Some(new_root) = node_for_removal.left.take() {
+            None => { // The node is the root
+                let mut node = node_ref;
+                self.root = if let Some(new_root) = node.left.take() {
                     new_root.borrow_mut().parent = Weak::new();
-                    Node::rightmost(&new_root).borrow_mut().right = node_for_removal.right.take();
+                    Node::rightmost(&new_root).borrow_mut().right = node.right.take();
                     Some(new_root)
-                } else if let Some(new_root) = node_for_removal.right.take() {
+                } else if let Some(new_root) = node.right.take() {
                     new_root.borrow_mut().parent = Weak::new();
-                    Node::leftmost(&new_root).borrow_mut().left = node_for_removal.left.take();
+                    Node::leftmost(&new_root).borrow_mut().left = node.left.take();
                     Some(new_root)
                 } else {
                     None
                 };
             }
         }
-
-        debug_assert_eq!(1, Rc::strong_count(&node_for_removal)); // node has been removed from the tree
-        self.length -= 1;
     }
 }
 
