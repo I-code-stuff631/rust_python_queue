@@ -1,4 +1,4 @@
-use pyo3::{prelude::*, types::{PyFunction, PyLong}};
+use pyo3::{prelude::*, types::{PyFunction}};
 #[allow(unused_imports)]
 use pyo3::exceptions::PyIndexError;
 #[allow(unused_imports)]
@@ -189,11 +189,13 @@ impl DoublePriorityQueue {
 
     /// Pops off an item that satisfys the condition and is numerically closest to the value of the specified item.
     /// Returns None if no such item exists.
-    fn pop_with_if_closest(&mut self,
+    /// Pops off the numerically closest item to the one supplied pr
+    fn pop_closest_satisfying(&mut self,
         py: Python<'_>,
-        item: &PyAny, // Item should be first
+        item: &PyAny, // Should be before condition
         condition: &PyFunction,
     ) -> Result<Option<Py<PyAny>>, PyErr> {
+        // Filter by condition
         let mut filtered = Vec::with_capacity(self.length);
         for node in self.into_iter() {
             if condition.call1((&node.borrow().item,))?.extract::<bool>()? {
@@ -201,41 +203,34 @@ impl DoublePriorityQueue {
             }
         }
         let mut filtered = filtered.into_iter();
-
-        fn numeric_value_from(value: &PyAny) -> PyResult<f64> {
-            let py = value.py();
-            Ok(match value.downcast::<PyLong>() {
-                Ok(int) => int.extract::<i128>()? as f64,
-                Err(_) => value.extract::<f64>()?,
-            })
-        }
         
+        // Find closest to 
         Ok(match filtered.next() {
             Some(node) => {
-                let item_value = numeric_value_from(self.get_comparison_value_for(item)?.as_ref(py))?;
-                let initial = {
-                    let node_value = numeric_value_from(node.borrow().value.as_ref(py))?;
-                    let difference = f64::abs(node_value - item_value);
-                    (node, difference)
+                let value = self.get_comparison_value_for(item)?;
+                let abs_diff = |value_1: &Py<PyAny>, value_2: &Py<PyAny>| -> PyResult<Py<PyAny>> {
+                    value_1.call_method1(py, "__sub__", (value_2,))?.call_method0(py, "__abs__")
                 };
+                
+                let closest = filtered.try_fold({
+                        let diff = abs_diff(&node.borrow().value, &value)?;
+                        (node, diff)
+                    },
+                    |(closest, least_diff), node: WNode| -> PyResult<_> {
+                        let diff = abs_diff(&node.borrow().value, &value)?;
 
-                let closest = filtered.try_fold(initial,
-                    |(closest, least_difference): (WNode, f64), node: WNode| -> PyResult<_> {
-                        let node_value = numeric_value_from(node.borrow().value.as_ref(py))?;
-                        let difference = f64::abs(node_value - item_value);
-
-                        Ok(if difference < least_difference {
-                            (node, difference)
+                        Ok(if diff.as_ref(py).lt(&least_diff)? {
+                            (node, diff)
                         } else {
-                            (closest, least_difference)
+                            (closest, least_diff)
                         })
                     }
                 )?.0;
-                // Remove closest
-                self.remove_node(&closest);
 
-                // Return item
-                Some(Rc::try_unwrap(closest).ok().expect("Should no longer be in the tree").into_inner().item)
+                self.remove_node(&closest);
+                let r = Rc::try_unwrap(closest).ok().expect("Should no longer be in the tree").into_inner().item;
+                self.length -= 1;
+                Some(r)
             },
             None => None,
         })
@@ -269,9 +264,6 @@ impl DoublePriorityQueue {
     //     //     None => Ok(false),
     //     // }
     // }
-
-    // /// Ez impl by calling __delitem__ when it is impled
-    // fn remove(&mut self) { todo!() }
 
     fn clear(&mut self) { 
         self.root = None;
