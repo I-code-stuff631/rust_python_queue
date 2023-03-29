@@ -1,5 +1,5 @@
 from rust_queue import DoublePriorityQueue as DPQueue
-import unittest  # Hacker rank
+import unittest
 
 
 class Test(unittest.TestCase):

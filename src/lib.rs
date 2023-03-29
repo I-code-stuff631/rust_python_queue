@@ -1,4 +1,4 @@
-use pyo3::{prelude::*, types::{PyFunction}};
+use pyo3::{prelude::*, types::{PyFunction}, exceptions::PyValueError};
 #[allow(unused_imports)]
 use pyo3::exceptions::PyIndexError;
 #[allow(unused_imports)]
@@ -187,9 +187,6 @@ impl DoublePriorityQueue {
         })
     }
 
-    /// Pops off an item that satisfys the condition and is numerically closest to the value of the specified item.
-    /// Returns None if no such item exists.
-    /// Pops off the numerically closest item to the one supplied pr
     fn pop_closest_satisfying(&mut self,
         py: Python<'_>,
         item: &PyAny, // Should be before condition
@@ -202,9 +199,10 @@ impl DoublePriorityQueue {
                 filtered.push(node);
             }
         }
+        filtered.shrink_to_fit();
         let mut filtered = filtered.into_iter();
         
-        // Find closest to 
+        // Find closest
         Ok(match filtered.next() {
             Some(node) => {
                 let value = self.get_comparison_value_for(item)?;
@@ -265,6 +263,16 @@ impl DoublePriorityQueue {
     //     // }
     // }
 
+    fn remove(&mut self, item: &PyAny) -> PyResult<()> {
+        let node = self
+            .into_iter()
+            .find(|node| node.borrow().item.is(item))
+            .ok_or_else(|| PyValueError::new_err("The item was not found in the queue"))?;
+        self.remove_node(&node);
+        self.length -= 1;
+        Ok(())
+    }
+
     fn clear(&mut self) { 
         self.root = None;
         self.length = 0;
@@ -285,7 +293,6 @@ impl DoublePriorityQueue {
     fn __delitem__(&mut self, index: usize) -> PyResult<()> {
         let node = self.node_at(index)?;
         self.remove_node(&node);
-        debug_assert_eq!(1, Rc::strong_count(&node)); // The node has been removed from the tree
         self.length -= 1;
         Ok(())
     }
@@ -361,7 +368,6 @@ impl Iterator for Iter {
                 None => {
                     // Stop iteration early
                     self.stack.clear();
-                    self.stack.shrink_to_fit();
                     None
                 }
             }
@@ -461,13 +467,13 @@ impl DoublePriorityQueue {
                 };
             }
         }
+        debug_assert_eq!(1, Rc::strong_count(node)); // The node has been removed from the tree
     }
 }
 
 impl Iter {
     /// Causes the iterator to yield `Py<PyAny>` instead of `WNode`
-    fn yield_py_any(self) -> PyIter { // This SHOULD be always being inlined as idk how it would be able to not be
-        // (u might want to test that tho) #[repr(transparent)]?
+    fn yield_py_any(self) -> PyIter {
         PyIter(self)
     }
 }
