@@ -47,6 +47,7 @@ class Test(unittest.TestCase):
 
     def test_indexing(self):
         self.small_test_tree()
+        # 10, 6, 5, 5, 3, 2, 0
 
         self.assertEqual(10, self.queue[0])
         self.assertEqual(6, self.queue[1])
@@ -70,68 +71,79 @@ class Test(unittest.TestCase):
         self.assertFalse(1 in self.queue)
 
     def test_length_tracking(self):
-        for _ in range(5):
+        for _ in range(10):
             self.queue.push(None)
-        self.assertEqual(5, len(self.queue))
+        self.assertEqual(10, len(self.queue))
 
         # Peek does not modify length
         self.queue.peek_max()
+        self.assertEqual(10, len(self.queue))
         self.queue.peek_min()
-        self.assertEqual(5, len(self.queue))
+        self.assertEqual(10, len(self.queue))
 
         self.queue.pop_max()
-        self.assertEqual(4, len(self.queue))
+        self.assertEqual(9, len(self.queue))
         self.queue.pop_min()
-        self.assertEqual(3, len(self.queue))
-        del self.queue[0]
-        self.assertEqual(2, len(self.queue))
+        self.assertEqual(8, len(self.queue))
+        self.queue.__delitem__(len(self.queue) - 1)
+        self.assertEqual(7, len(self.queue))
 
         self.queue.clear()
         self.assertEqual(0, len(self.queue))
         self.queue.pop_max()
-        # noinspection PyBroadException
-        try:
-            del self.queue[0]  # __delitem__
-        except Exception:
-            pass
+        self.assertEqual(0, len(self.queue))
         self.queue.pop_min()
         self.assertEqual(0, len(self.queue))
+        self.assertRaises(IndexError, self.queue.__delitem__, 0)
+        self.assertEqual(0, len(self.queue))
 
-    # def test_other(self):
-    #     """For things that don't really get tested elsewhere"""
-    #     self.medium_test_tree()
-    #
-    #     self.assertEqual(10, self.queue.pop())
-    #     self.assertEqual(10, self.queue.pop())
-    #     self.assertEqual(10, self.queue.peek())
-    #     self.assertEqual(10, self.queue.pop())
-    #
-    #     self.assertEqual(6, self.queue.peek())
-    #     self.assertEqual(6, self.queue.pop())
-    #     self.assertEqual(6, self.queue.pop())
-    #
-    #     # Uncomment when impled
-    #     # for _ in range(3):
-    #     #     del self.queue[0]
-    #     # Comment when impled
-    #     for _ in range(3):
-    #         self.queue.pop()
-    #     self.assertEqual(5, self.queue.pop())
-    #     self.assertEqual(3, self.queue.pop())
-    #
-    #     self.queue.clear()
-    #     self.assertEqual(None, self.queue.pop())
-    #     self.assertEqual(None, self.queue.peek())
-    #     # del self.queue[0]?
+    def test_other(self):
+        self.medium_test_tree()
+        # 10, 10, 10, 6, 6, 5, 5, 5, 5, 3, 3, 2, 2, 0, 0
 
-    def test_print(self):
-        self.assertEqual("[]", str(self.queue))
-        self.queue.push(5)
-        self.queue.push(10)
-        self.queue.push(5)
-        self.queue.push(1)
-        self.queue.push(3)
-        self.assertEqual("[10, 5, 5, 3, 1]", str(self.queue))
+        self.assertEqual(10, self.queue.pop_max())
+        self.assertEqual(10, self.queue.pop_max())
+        self.assertEqual(10, self.queue.peek_max())
+        self.assertEqual(10, self.queue.pop_max())
+
+        self.assertEqual(0, self.queue.pop_min())
+        self.assertEqual(0, self.queue.peek_min())
+        self.assertEqual(0, self.queue.pop_min())
+
+        self.assertEqual(6, self.queue.peek_max())
+        self.assertEqual(6, self.queue.pop_max())
+        self.assertEqual(6, self.queue.pop_max())
+
+        self.assertEqual(2, self.queue.pop_min())
+        self.assertEqual(2, self.queue.pop_min())
+        self.assertEqual(3, self.queue.peek_min())
+
+        # 5, 5, 5, 5, 3, 3
+        for _ in range(2):
+            self.queue.__delitem__(2)
+
+        # 5, 5, 3, 3
+        self.assertEqual(5, self.queue.pop_max())
+        self.assertEqual(3, self.queue.pop_min())
+        self.assertEqual(5, self.queue.peek_max())
+        self.assertEqual(3, self.queue.peek_min())
+        # 5, 3
+
+        self.queue.clear()
+        self.assertRaises(IndexError, self.queue.__delitem__, 0)
+        self.assertEqual(None, self.queue.pop_max())
+        self.assertEqual(None, self.queue.peek_max())
+        self.assertEqual(None, self.queue.pop_min())
+        self.assertEqual(None, self.queue.peek_min())
+
+    # def test_print(self):
+    #     self.assertEqual("[]", str(self.queue))
+    #     self.queue.push(5)
+    #     self.queue.push(10)
+    #     self.queue.push(5)
+    #     self.queue.push(1)
+    #     self.queue.push(3)
+    #     self.assertEqual("[10, 5, 5, 3, 1]", str(self.queue))
 
     def small_test_tree(self):
         """10, 6, 5, 5, 3, 2, 0"""
