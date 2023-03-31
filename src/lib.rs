@@ -155,8 +155,9 @@ impl DoublePriorityQueue {
                 }
             };
 
+            let r = Rc::try_unwrap(greatest_node).ok().expect("The node should no longer be in the tree").into_inner().item;
             self.length -= 1;
-            Rc::try_unwrap(greatest_node).ok().expect("The node should no longer be in the tree").into_inner().item
+            r
         })
     }
 
@@ -182,8 +183,9 @@ impl DoublePriorityQueue {
                 }
             };
 
+            let r = Rc::try_unwrap(least_node).ok().expect("The node should no longer be in the tree").into_inner().item;
             self.length -= 1;
-            Rc::try_unwrap(least_node).ok().expect("The node should no longer be in the tree").into_inner().item
+            r
         })
     }
 
